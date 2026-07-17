@@ -209,6 +209,65 @@
     </form>
   </dialog>
 
+  <dialog class="auth-dialog" id="authDialog" aria-labelledby="authDialogTitle">
+    <form method="dialog">
+      <button class="dialog-close" value="cancel" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+      <p class="eyebrow" id="authDialogEyebrow">账户连接</p>
+      <h2 id="authDialogTitle">更新授权</h2>
+
+      <section class="auth-panel" id="onelapAuthPanel" hidden>
+        <p class="dialog-copy">使用顽鹿账号直接登录。密码会立即转换为登录摘要，原始密码不会写入数据目录。</p>
+        <div class="onelap-fields">
+          <label class="form-field">
+            <span>账号</span>
+            <input id="onelapAccountInput" type="text" autocomplete="username" maxlength="200" placeholder="手机号、邮箱或用户名">
+          </label>
+          <label class="form-field">
+            <span>密码</span>
+            <input id="onelapPasswordInput" type="password" autocomplete="current-password" maxlength="512" placeholder="顽鹿登录密码">
+            <small>登录凭据和刷新 token 仅保存在本机数据目录，请勿将该目录公开共享。</small>
+          </label>
+        </div>
+        <div class="auth-actions">
+          <button class="button button-primary" id="onelapAuthButton" type="button">登录并验证</button>
+        </div>
+      </section>
+
+      <section class="auth-panel" id="stravaAuthPanel" hidden>
+        <p class="dialog-copy">默认使用 Strava Web 会话上传。会话只写入本机数据目录，并会在保存前验证。</p>
+        <label class="form-field">
+          <span>Cookie 请求头</span>
+          <textarea id="stravaCookieInput" rows="4" autocomplete="off" spellcheck="false" placeholder="Cookie: _strava4_session=…"></textarea>
+          <small>在已登录 Strava 的浏览器开发者工具中，复制任一 strava.com 请求的 Cookie 请求头。</small>
+        </label>
+        <div class="auth-actions">
+          <button class="button button-primary" id="stravaCookieButton" type="button">保存 Web 会话</button>
+        </div>
+
+        <div class="auth-divider"><span>或导入 HAR</span></div>
+        <label class="file-field compact">
+          <span>Strava HAR</span>
+          <input id="stravaHarInput" type="file" accept=".har,application/json">
+        </label>
+        <div class="auth-actions">
+          <button class="button button-quiet" id="stravaHarButton" type="button">从 HAR 提取会话</button>
+        </div>
+
+        <details class="oauth-details">
+          <summary>改用 Strava API OAuth</summary>
+          <p>需要先在 Strava 创建 API Application，并把当前站点域名设为 Authorization Callback Domain。</p>
+          <div class="oauth-fields">
+            <label class="form-field"><span>Client ID</span><input id="stravaClientId" type="text" inputmode="numeric" autocomplete="off"></label>
+            <label class="form-field"><span>Client Secret</span><input id="stravaClientSecret" type="password" autocomplete="off"></label>
+          </div>
+          <button class="button button-quiet" id="stravaOauthButton" type="button">前往 Strava 授权</button>
+        </details>
+      </section>
+    </form>
+  </dialog>
+
   <dialog class="job-dialog" id="jobDialog" aria-labelledby="jobDialogTitle">
     <form method="dialog">
       <button class="dialog-close" id="jobCloseButton" value="cancel" aria-label="关闭">

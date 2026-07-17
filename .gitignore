@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .onelap_token.json
+.onelap_auth.json
 .strava_auth.json
 .strava_web_session.json
 .strava_sync_state.json

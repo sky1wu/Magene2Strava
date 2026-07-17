@@ -10,6 +10,7 @@ import math
 import mimetypes
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import fitdecode
 import download_latest_fit as onelap
@@ -34,6 +35,10 @@ WEB_ROOT = APP_ROOT / "web"
 CACHE_PATH = DATA_ROOT / ".dashboard_cache.json"
 STATE_PATH = DATA_ROOT / sync.SYNC_STATE
 FIT_DIR = DATA_ROOT / "fits"
+ONELAP_HAR_PATH = DATA_ROOT / "onelap_auth.har"
+ONELAP_DIRECT_AUTH_PATH = DATA_ROOT / onelap.DIRECT_AUTH_CACHE
+STRAVA_CONFIG_PATH = DATA_ROOT / sync.STRAVA_CONFIG
+STRAVA_WEB_SESSION_PATH = DATA_ROOT / sync.STRAVA_WEB_SESSION
 FINAL_STATUSES = sync.FINAL_STATUSES
 FIT_NAME = re.compile(
     r"^(?P<device>.+?)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})(?:_.+)?\.fit$",
@@ -248,23 +253,46 @@ def connection_status() -> list[dict[str, Any]]:
     token = read_json(DATA_ROOT / onelap.TOKEN_CACHE, {})
     expiry = integer(token.get("expires_at"))
     onelap_ok = expiry > int(time.time()) + 60
+    onelap_direct = onelap.direct_auth_configured(ONELAP_DIRECT_AUTH_PATH)
+    onelap_har = ONELAP_HAR_PATH.is_file()
 
-    web_session = read_json(DATA_ROOT / sync.STRAVA_WEB_SESSION, {})
+    web_session = read_json(STRAVA_WEB_SESSION_PATH, {})
     cookie_count = len(web_session.get("cookies", [])) if isinstance(web_session.get("cookies"), list) else 0
-    strava_ok = cookie_count > 0
+    strava_config = read_json(STRAVA_CONFIG_PATH, {})
+    strava_api = all(
+        strava_config.get(field) for field in ("client_id", "client_secret", "refresh_token")
+    )
+    strava_web = cookie_count > 0
+    strava_ok = strava_web or strava_api
 
     return [
         {
             "id": "onelap",
             "name": "顽鹿运动",
-            "detail": "授权有效" if onelap_ok else "需要刷新授权",
-            "status": "connected" if onelap_ok else "attention",
+            "detail": (
+                "账号登录已配置"
+                if onelap_direct
+                else "授权有效"
+                if onelap_ok
+                else "授权文件已保存，可刷新令牌"
+                if onelap_har
+                else "尚未授权"
+            ),
+            "status": "connected" if onelap_direct or onelap_ok or onelap_har else "attention",
+            "action": "更新登录" if onelap_direct or onelap_ok or onelap_har else "登录授权",
         },
         {
             "id": "strava",
             "name": "Strava",
-            "detail": "Web 会话已保存" if strava_ok else "尚未连接",
+            "detail": (
+                "Web 会话已保存"
+                if strava_web
+                else "API OAuth 已授权（备用）"
+                if strava_api
+                else "尚未授权"
+            ),
             "status": "connected" if strava_ok else "attention",
+            "action": "更新会话" if strava_web else "Web 授权",
         },
         {
             "id": "storage",
@@ -273,6 +301,184 @@ def connection_status() -> list[dict[str, Any]]:
             "status": "connected",
         },
     ]
+
+
+def preferred_strava_mode() -> str:
+    session = read_json(STRAVA_WEB_SESSION_PATH, {})
+    if isinstance(session.get("cookies"), list) and session["cookies"]:
+        return "web"
+    config = read_json(STRAVA_CONFIG_PATH, {})
+    if all(config.get(field) for field in ("client_id", "client_secret", "refresh_token")):
+        return "api"
+    return "web"
+
+
+class AuthService:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.pending_strava: dict[str, dict[str, Any]] = {}
+
+    def import_onelap_har(self, har: dict[str, Any]) -> str:
+        entries = har.get("log", {}).get("entries", [])
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("HAR 中没有可用的网络请求")
+        login_entry = next(
+            (
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and urlparse(str(entry.get("request", {}).get("url", ""))).path
+                == onelap.LOGIN_PATH
+            ),
+            None,
+        )
+        if not login_entry:
+            raise ValueError("HAR 未包含顽鹿登录请求，请从登录前开始录制")
+
+        suffix = uuid.uuid4().hex
+        temporary_har = DATA_ROOT / f".onelap_auth.{suffix}.har"
+        temporary_cache = DATA_ROOT / f".onelap_token.{suffix}.json"
+        try:
+            sync.save_json(temporary_har, har)
+            headers, source = onelap.obtain_auth(
+                temporary_cache,
+                str(temporary_har),
+                str(temporary_har),
+                30.0,
+            )
+            onelap.newest_record(headers, 30.0)
+            retained = {
+                "log": {
+                    "version": "1.2",
+                    "creator": {"name": "Magene2Strava", "version": "1"},
+                    "entries": [
+                        {
+                            "startedDateTime": login_entry.get("startedDateTime", ""),
+                            "request": login_entry.get("request", {}),
+                        }
+                    ],
+                }
+            }
+            sync.save_json(temporary_har, retained)
+            os.replace(temporary_har, ONELAP_HAR_PATH)
+            os.replace(temporary_cache, DATA_ROOT / onelap.TOKEN_CACHE)
+            for path in (ONELAP_HAR_PATH, DATA_ROOT / onelap.TOKEN_CACHE):
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+            return source
+        finally:
+            temporary_har.unlink(missing_ok=True)
+            temporary_cache.unlink(missing_ok=True)
+
+    def login_onelap(self, account: str, password: str) -> str:
+        temporary = DATA_ROOT / f".onelap_auth.{uuid.uuid4().hex}.json"
+        try:
+            client = onelap.configure_direct_auth(temporary, account, password, 30.0)
+            client.records(page_size=1, max_pages=1)
+            os.replace(temporary, ONELAP_DIRECT_AUTH_PATH)
+            try:
+                os.chmod(ONELAP_DIRECT_AUTH_PATH, 0o600)
+            except OSError:
+                pass
+            return client.source
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def import_strava_cookie(self, cookie_header: str) -> None:
+        if not cookie_header.strip():
+            raise ValueError("请粘贴 Strava Cookie 请求头")
+        sync.save_cookie_header_session(cookie_header, STRAVA_WEB_SESSION_PATH, 30.0)
+
+    def import_strava_har(self, har: dict[str, Any]) -> None:
+        entries = har.get("log", {}).get("entries", [])
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("HAR 中没有可用的网络请求")
+        temporary_har = DATA_ROOT / f".strava_auth.{uuid.uuid4().hex}.har"
+        try:
+            sync.save_json(temporary_har, har)
+            sync.import_strava_har(temporary_har, STRAVA_WEB_SESSION_PATH, 30.0)
+        finally:
+            temporary_har.unlink(missing_ok=True)
+
+    def start_strava(
+        self, client_id: str, client_secret: str, redirect_uri: str
+    ) -> dict[str, str]:
+        if not client_id.isdigit() or len(client_id) > 20:
+            raise ValueError("Strava Client ID 格式无效")
+        if len(client_secret) < 8 or len(client_secret) > 200:
+            raise ValueError("Strava Client Secret 格式无效")
+        parsed = urlparse(redirect_uri)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path != "/api/auth/strava/callback"
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError("Strava 回调地址无效")
+
+        state = secrets.token_urlsafe(32)
+        now = int(time.time())
+        with self.lock:
+            self.pending_strava = {
+                key: value
+                for key, value in self.pending_strava.items()
+                if integer(value.get("expires_at")) > now
+            }
+            self.pending_strava[state] = {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "expires_at": now + 600,
+            }
+        authorization_url = sync.STRAVA_AUTHORIZE_URL + "?" + urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "approval_prompt": "force",
+                "scope": ",".join(sorted(sync.REQUIRED_SCOPES)),
+                "state": state,
+            }
+        )
+        return {"authorization_url": authorization_url, "redirect_uri": redirect_uri}
+
+    def complete_strava(self, state: str, code: str, scope_text: str) -> None:
+        with self.lock:
+            pending = self.pending_strava.pop(state, None)
+        if not pending or integer(pending.get("expires_at")) <= int(time.time()):
+            raise ValueError("Strava 授权请求已失效，请重新开始")
+        if not code:
+            raise ValueError("Strava 未返回授权码")
+        tokens = sync.oauth_token(
+            {
+                "client_id": str(pending["client_id"]),
+                "client_secret": str(pending["client_secret"]),
+                "code": code,
+                "grant_type": "authorization_code",
+            },
+            30.0,
+        )
+        granted_text = str(tokens.get("scope") or scope_text)
+        granted = set(granted_text.replace(",", " ").split())
+        if not sync.REQUIRED_SCOPES.issubset(granted):
+            raise ValueError("未授予 activity:read_all 和 activity:write 权限")
+        sync.save_json(
+            STRAVA_CONFIG_PATH,
+            {
+                "version": 1,
+                "client_id": str(pending["client_id"]),
+                "client_secret": str(pending["client_secret"]),
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens["refresh_token"],
+                "expires_at": integer(tokens.get("expires_at")),
+                "scope": " ".join(sorted(granted)),
+            },
+        )
 
 
 class DashboardService:
@@ -342,10 +548,26 @@ class DashboardService:
         if not self.refresh_lock.acquire(blocking=False):
             raise RuntimeError("数据刷新正在进行，请稍候")
         try:
-            headers, auth_source = onelap.obtain_auth(
-                DATA_ROOT / onelap.TOKEN_CACHE, None, None, 30.0
-            )
-            records = sync.onelap_records(headers, 30.0)
+            if ONELAP_DIRECT_AUTH_PATH.is_file():
+                direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
+                records = direct.records()
+                auth_source = direct.source
+            else:
+                login_har = str(ONELAP_HAR_PATH) if ONELAP_HAR_PATH.is_file() else None
+                headers, auth_source = onelap.obtain_auth(
+                    DATA_ROOT / onelap.TOKEN_CACHE, login_har, login_har, 30.0
+                )
+                try:
+                    records = sync.onelap_records(headers, 30.0)
+                except onelap.AuthenticationError:
+                    headers, auth_source = onelap.obtain_auth(
+                        DATA_ROOT / onelap.TOKEN_CACHE,
+                        login_har,
+                        login_har,
+                        30.0,
+                        force_login=True,
+                    )
+                    records = sync.onelap_records(headers, 30.0)
             state = read_json(STATE_PATH, {"version": 1, "records": {}})
             states = state.get("records", {})
             if not isinstance(states, dict):
@@ -374,6 +596,14 @@ class JobManager:
                 raise RuntimeError("已有同步任务正在运行")
             job_id = uuid.uuid4().hex[:12]
             command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
+            strava_mode = preferred_strava_mode()
+            command.extend(["--strava-mode", strava_mode])
+            if ONELAP_DIRECT_AUTH_PATH.is_file():
+                command.extend(["--onelap-auth", str(ONELAP_DIRECT_AUTH_PATH)])
+            elif ONELAP_HAR_PATH.is_file():
+                command.extend(
+                    ["--har", str(ONELAP_HAR_PATH), "--login-har", str(ONELAP_HAR_PATH)]
+                )
             if mode == "preview":
                 command.append("--dry-run")
             else:
@@ -381,6 +611,7 @@ class JobManager:
             job = {
                 "id": job_id,
                 "mode": mode,
+                "strava_mode": strava_mode,
                 "status": "running",
                 "started_at": int(time.time()),
                 "finished_at": 0,
@@ -433,6 +664,7 @@ class JobManager:
 
 SERVICE = DashboardService()
 JOBS = JobManager()
+AUTHS = AuthService()
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -465,9 +697,9 @@ class AppHandler(BaseHTTPRequestHandler):
     def send_error_json(self, message: str, status: int = 400) -> None:
         self.send_json({"error": message}, status)
 
-    def read_body(self) -> dict[str, Any]:
+    def read_body(self, max_bytes: int = 16_384) -> dict[str, Any]:
         length = integer(self.headers.get("Content-Length"))
-        if length < 0 or length > 16_384:
+        if length < 0 or length > max_bytes:
             raise ValueError("请求内容过大")
         if length == 0:
             return {}
@@ -479,8 +711,34 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValueError("请求必须是 JSON 对象")
         return value
 
+    def send_redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.security_headers()
+        self.end_headers()
+
+    def handle_strava_callback(self, query: str) -> None:
+        params = parse_qs(query)
+        try:
+            if params.get("error"):
+                raise ValueError("Strava 授权已取消")
+            AUTHS.complete_strava(
+                params.get("state", [""])[0],
+                params.get("code", [""])[0],
+                params.get("scope", [""])[0],
+            )
+            self.send_redirect("/?auth=strava-success")
+        except (ValueError, sync.SyncError) as exc:
+            message = quote(str(exc)[:180], safe="")
+            self.send_redirect(f"/?auth=strava-error&message={message}")
+
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/auth/strava/callback":
+            self.handle_strava_callback(parsed.query)
+            return
         if path == "/api/health":
             self.send_json({"status": "ok", "time": int(time.time())})
             return
@@ -502,7 +760,55 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         try:
-            body = self.read_body()
+            body_limit = (
+                12 * 1024 * 1024
+                if path in {"/api/auth/onelap/har", "/api/auth/strava/har"}
+                else 128 * 1024
+                if path == "/api/auth/strava/web-session"
+                else 16_384
+            )
+            body = self.read_body(body_limit)
+            if path == "/api/auth/onelap/login":
+                source = AUTHS.login_onelap(
+                    str(body.get("account") or "").strip(),
+                    str(body.get("password") or ""),
+                )
+                self.send_json({"status": "connected", "source": source})
+                return
+            if path == "/api/auth/onelap/har":
+                har = body.get("har")
+                if not isinstance(har, dict):
+                    raise ValueError("请选择有效的 HAR 文件")
+                source = AUTHS.import_onelap_har(har)
+                self.send_json({"status": "connected", "source": source})
+                return
+            if path == "/api/auth/strava/web-session":
+                AUTHS.import_strava_cookie(str(body.get("cookie_header") or ""))
+                self.send_json({"status": "connected", "mode": "web"})
+                return
+            if path == "/api/auth/strava/har":
+                har = body.get("har")
+                if not isinstance(har, dict):
+                    raise ValueError("请选择有效的 HAR 文件")
+                AUTHS.import_strava_har(har)
+                self.send_json({"status": "connected", "mode": "web"})
+                return
+            if path == "/api/auth/strava/start":
+                redirect_uri = str(body.get("redirect_uri") or "")
+                origin = urlparse(str(self.headers.get("Origin") or ""))
+                callback = urlparse(redirect_uri)
+                if origin.netloc and (
+                    origin.scheme != callback.scheme or origin.netloc != callback.netloc
+                ):
+                    raise ValueError("回调地址必须与当前页面同源")
+                self.send_json(
+                    AUTHS.start_strava(
+                        str(body.get("client_id") or "").strip(),
+                        str(body.get("client_secret") or "").strip(),
+                        redirect_uri,
+                    )
+                )
+                return
             if path == "/api/refresh":
                 self.send_json(SERVICE.refresh())
                 return

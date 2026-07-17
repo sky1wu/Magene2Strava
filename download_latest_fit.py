@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -23,6 +26,10 @@ LIST_PATH = "/indoor/v2/app/record/list"
 FIT_PATH_PREFIX = "/indoor/v1/app/data/riding/share/"
 DROP_HEADERS = {"host", "accept-encoding", "connection", "content-length"}
 TOKEN_CACHE = ".onelap_token.json"
+DIRECT_AUTH_CACHE = ".onelap_auth.json"
+WEB_BASE_URL = "https://www.onelap.cn"
+OTM_BASE_URL = "https://otm.onelap.cn"
+OTM_FALLBACK_BASE_URL = "https://u.onelap.cn"
 
 
 class DownloadError(RuntimeError):
@@ -31,6 +38,528 @@ class DownloadError(RuntimeError):
 
 class AuthenticationError(DownloadError):
     pass
+
+
+class ApiRequestError(DownloadError):
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+def _private_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as file:
+            json.dump(value, file, ensure_ascii=False, separators=(",", ":"))
+            file.write("\n")
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_direct_auth(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise AuthenticationError("OneLap account login is not configured")
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            value = json.load(file)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AuthenticationError("OneLap account login file is invalid") from exc
+    if not isinstance(value, dict):
+        raise AuthenticationError("OneLap account login file is invalid")
+    if not str(value.get("account") or "").strip() or not re.fullmatch(
+        r"[0-9a-f]{32}", str(value.get("password_md5") or "")
+    ):
+        raise AuthenticationError("OneLap account login file is incomplete")
+    return value
+
+
+def direct_auth_configured(path: Path) -> bool:
+    try:
+        value = _load_direct_auth(path)
+    except AuthenticationError:
+        return False
+    return bool(value.get("token") and value.get("refresh_token"))
+
+
+def _multipart_body(fields: dict[str, str]) -> tuple[bytes, str]:
+    boundary = f"----Magene2Strava{os.getpid():x}{time.time_ns():x}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("ascii"),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _error_detail(body: bytes) -> str:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("msg") or payload.get("message") or payload.get("error") or "")
+
+
+def _response_cookies(response: Any) -> str:
+    headers = getattr(response, "headers", None)
+    values = headers.get_all("Set-Cookie") if headers and hasattr(headers, "get_all") else []
+    parsed = SimpleCookie()
+    for value in values or []:
+        try:
+            parsed.load(value)
+        except Exception:
+            continue
+    return "; ".join(f"{name}={item.value}" for name, item in parsed.items())
+
+
+def _open_json(
+    request: Request,
+    timeout: float,
+    context: str,
+    cookie_sink: list[str] | None = None,
+) -> dict[str, Any]:
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read()
+            cookie_header = _response_cookies(response)
+            if cookie_sink is not None and cookie_header:
+                cookie_sink[:] = [cookie_header]
+    except HTTPError as exc:
+        detail = _error_detail(exc.read(4096))
+        exc.close()
+        suffix = f": {detail}" if detail else ""
+        if exc.code in (401, 403):
+            raise AuthenticationError(f"{context} authentication failed (HTTP {exc.code})") from exc
+        raise ApiRequestError(f"{context} failed (HTTP {exc.code}){suffix}", exc.code) from exc
+    except URLError as exc:
+        raise ApiRequestError(f"{context} failed: {exc.reason}") from exc
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ApiRequestError(f"{context} returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise ApiRequestError(f"{context} returned an invalid response")
+    return value
+
+
+def _auth_fields(payload: dict[str, Any], *, login: bool) -> tuple[str, str]:
+    success_codes = {0, 200} if login else {200}
+    if payload.get("code") not in success_codes:
+        message = str(
+            payload.get("msg") or payload.get("message") or payload.get("error") or "unknown"
+        )
+        raise AuthenticationError(f"OneLap authentication failed: {message}")
+    raw_data = payload.get("data")
+    if isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], dict):
+        data = raw_data[0]
+    elif isinstance(raw_data, dict):
+        data = raw_data
+    else:
+        data = {}
+    token = str(data.get("token") or "").strip()
+    refresh_token = str(data.get("refresh_token") or "").strip()
+    if not token or (login and not refresh_token):
+        raise AuthenticationError("OneLap authentication response is missing token fields")
+    return token, refresh_token
+
+
+def configure_direct_auth(
+    path: Path, account: str, password: str, timeout: float
+) -> "OneLapOtmClient":
+    normalized_account = account.strip()
+    if not normalized_account or len(normalized_account) > 200:
+        raise AuthenticationError("OneLap account is empty or too long")
+    if not password or len(password) > 512:
+        raise AuthenticationError("OneLap password is empty or too long")
+    password_md5 = hashlib.md5(password.encode("utf-8"), usedforsecurity=False).hexdigest()
+    body, content_type = _multipart_body(
+        {"account": normalized_account, "password": password_md5}
+    )
+    captured_cookies: list[str] = []
+    payload = _open_json(
+        Request(
+            f"{WEB_BASE_URL}/api/login",
+            data=body,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": content_type,
+                "User-Agent": "Magene2Strava/1.0",
+            },
+            method="POST",
+        ),
+        timeout,
+        "OneLap login",
+        captured_cookies,
+    )
+    token, refresh_token = _auth_fields(payload, login=True)
+    _private_json(
+        path,
+        {
+            "version": 1,
+            "account": normalized_account,
+            "password_md5": password_md5,
+            "token": token,
+            "refresh_token": refresh_token,
+            "cookie_header": captured_cookies[0] if captured_cookies else "",
+            "updated_at": int(time.time()),
+        },
+    )
+    return OneLapOtmClient(path, timeout)
+
+
+def _epoch(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return int(number / 1000 if number > 10_000_000_000 else number)
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        number = float(text)
+        return int(number / 1000 if number > 10_000_000_000 else number)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+        return int(parsed.timestamp())
+    except ValueError:
+        return 0
+
+
+def _numeric(record: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = record.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    record_id = str(record.get("id") or record.get("activity_id") or "").strip()
+    started = _epoch(
+        record.get("start_time")
+        or record.get("start_riding_time")
+        or record.get("created_at")
+    )
+    if not record_id or not started:
+        return None
+    return {
+        "id": record_id,
+        "name": str(record.get("name") or record.get("title") or "骑行训练"),
+        "start_time": started,
+        "total_distance": _numeric(
+            record, "total_distance", "totalDistance", "distance", "distance_m"
+        ),
+        "total_time": int(
+            _numeric(record, "total_time", "totalTime", "time", "duration", "duration_s")
+        ),
+        "elevation": _numeric(
+            record, "elevation", "total_ascent", "totalAscent", "ascent"
+        ),
+        "cal": _numeric(record, "cal", "calories", "kcal"),
+        "TSS": _numeric(record, "TSS", "tss"),
+        "source": "onelap-otm",
+    }
+
+
+class OneLapOtmClient:
+    def __init__(self, auth_path: Path, timeout: float):
+        self.auth_path = auth_path
+        self.timeout = timeout
+        self.auth = _load_direct_auth(auth_path)
+
+    @property
+    def source(self) -> str:
+        return "account"
+
+    def _persist(self) -> None:
+        self.auth["updated_at"] = int(time.time())
+        _private_json(self.auth_path, self.auth)
+
+    def _login(self) -> None:
+        body, content_type = _multipart_body(
+            {
+                "account": str(self.auth["account"]),
+                "password": str(self.auth["password_md5"]),
+            }
+        )
+        captured_cookies: list[str] = []
+        payload = _open_json(
+            Request(
+                f"{WEB_BASE_URL}/api/login",
+                data=body,
+                headers={"Accept": "application/json", "Content-Type": content_type},
+                method="POST",
+            ),
+            self.timeout,
+            "OneLap login",
+            captured_cookies,
+        )
+        token, refresh_token = _auth_fields(payload, login=True)
+        self.auth["token"] = token
+        self.auth["refresh_token"] = refresh_token
+        if captured_cookies:
+            self.auth["cookie_header"] = captured_cookies[0]
+        self._persist()
+
+    def _refresh(self) -> bool:
+        refresh_token = str(self.auth.get("refresh_token") or "").strip()
+        if not refresh_token:
+            return False
+        body = json.dumps(
+            {"token": refresh_token, "from": "web", "to": "web"}, separators=(",", ":")
+        ).encode("utf-8")
+        try:
+            request_headers = {"Accept": "application/json", "Content-Type": "application/json"}
+            cookie_header = str(self.auth.get("cookie_header") or "").strip()
+            if cookie_header:
+                request_headers["Cookie"] = cookie_header
+            captured_cookies: list[str] = []
+            payload = _open_json(
+                Request(
+                    f"{WEB_BASE_URL}/api/token",
+                    data=body,
+                    headers=request_headers,
+                    method="POST",
+                ),
+                self.timeout,
+                "OneLap token refresh",
+                captured_cookies,
+            )
+            token, refreshed = _auth_fields(payload, login=False)
+        except (AuthenticationError, ApiRequestError):
+            return False
+        self.auth["token"] = token
+        if refreshed:
+            self.auth["refresh_token"] = refreshed
+        if captured_cookies:
+            self.auth["cookie_header"] = captured_cookies[0]
+        self._persist()
+        return True
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None = None,
+        content_type: str | None = None,
+    ) -> bytes:
+        headers = {
+            "Accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+            "Authorization": str(self.auth.get("token") or ""),
+            "User-Agent": "Magene2Strava/1.0",
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        cookie_header = str(self.auth.get("cookie_header") or "").strip()
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        request = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                body = response.read()
+        except HTTPError as exc:
+            detail = _error_detail(exc.read(4096))
+            exc.close()
+            if exc.code in (401, 403):
+                raise AuthenticationError(
+                    f"OneLap OTM authentication failed (HTTP {exc.code})"
+                ) from exc
+            suffix = f": {detail}" if detail else ""
+            raise ApiRequestError(
+                f"OneLap OTM request failed (HTTP {exc.code}){suffix}", exc.code
+            ) from exc
+        except URLError as exc:
+            raise ApiRequestError(f"OneLap OTM request failed: {exc.reason}") from exc
+        if body.lstrip().startswith(b"{"):
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("code") in (401, 403):
+                raise AuthenticationError("OneLap OTM rejected the saved token")
+        return body
+
+    def _authorized(
+        self,
+        method: str,
+        url: str,
+        *,
+        data: bytes | None = None,
+        content_type: str | None = None,
+    ) -> bytes:
+        try:
+            return self._send(method, url, data=data, content_type=content_type)
+        except AuthenticationError:
+            pass
+        if self._refresh():
+            try:
+                return self._send(method, url, data=data, content_type=content_type)
+            except AuthenticationError:
+                pass
+        self._login()
+        return self._send(method, url, data=data, content_type=content_type)
+
+    def _authorized_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        body = (
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            if payload is not None
+            else None
+        )
+        raw = self._authorized(
+            method,
+            f"{OTM_BASE_URL}{path}",
+            data=body,
+            content_type="application/json" if body is not None else None,
+        )
+
+        def decode(value: bytes) -> dict[str, Any]:
+            try:
+                decoded = json.loads(value.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ApiRequestError("OneLap OTM returned invalid JSON") from exc
+            if not isinstance(decoded, dict):
+                raise ApiRequestError("OneLap OTM returned an invalid response")
+            return decoded
+
+        value = decode(raw)
+        if value.get("code") in (401, 403):
+            if self._refresh():
+                raw = self._send(
+                    method,
+                    f"{OTM_BASE_URL}{path}",
+                    data=body,
+                    content_type="application/json" if body is not None else None,
+                )
+            else:
+                self._login()
+                raw = self._send(
+                    method,
+                    f"{OTM_BASE_URL}{path}",
+                    data=body,
+                    content_type="application/json" if body is not None else None,
+                )
+            value = decode(raw)
+        try:
+            code = int(value.get("code"))
+        except (TypeError, ValueError):
+            code = -1
+        if code != 200:
+            message = str(value.get("msg") or value.get("message") or value.get("error") or "unknown")
+            normalized_message = message.lower()
+            if code == -2 or any(
+                marker in normalized_message for marker in ("risk control", "risk_control", "风控")
+            ):
+                raise ApiRequestError(f"OneLap risk control rejected the request: {message}")
+            raise ApiRequestError(f"OneLap OTM returned code={code!r}: {message}")
+        return value
+
+    def record_detail(self, record_id: str) -> dict[str, Any]:
+        result = self._authorized_json(
+            "GET", f"/api/otm/ride_record/analysis/{quote(record_id, safe='')}"
+        )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise ApiRequestError("OneLap OTM activity detail is invalid")
+        riding_record = data.get("ridingRecord")
+        if isinstance(riding_record, dict):
+            return riding_record
+        return data
+
+    def records(self, page_size: int = 50, max_pages: int = 200) -> list[dict[str, Any]]:
+        records: dict[str, dict[str, Any]] = {}
+        expected = 0
+        for page in range(1, max_pages + 1):
+            result = self._authorized_json(
+                "POST", "/api/otm/ride_record/list", {"page": page, "limit": page_size}
+            )
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise ApiRequestError("OneLap OTM activity payload is invalid")
+            batch = data.get("list")
+            if not isinstance(batch, list):
+                raise ApiRequestError("OneLap OTM activity list is invalid")
+            for raw in batch:
+                if not isinstance(raw, dict):
+                    continue
+                normalized = normalize_otm_record(raw)
+                if normalized and (
+                    normalized["total_distance"] <= 0 or normalized["total_time"] <= 0
+                ):
+                    try:
+                        detail = self.record_detail(str(normalized["id"]))
+                        normalized = normalize_otm_record({**raw, **detail})
+                    except ApiRequestError as exc:
+                        if "risk control" in str(exc).lower():
+                            raise
+                if normalized:
+                    records[str(normalized["id"])] = normalized
+            for key in ("count", "total"):
+                try:
+                    expected = max(expected, int(data.get(key) or 0))
+                except (TypeError, ValueError):
+                    pass
+            if not batch or len(batch) < page_size or (expected and len(records) >= expected):
+                break
+        return list(records.values())
+
+    def download_record_fit(self, record_id: str, target: Path, force: bool = False) -> str:
+        if target.exists() and not force:
+            return "exists"
+        encoded_id = quote(record_id, safe="")
+        path = f"/api/otm/ride_record/analysis/fit_content/{encoded_id}"
+        raw: bytes | None = None
+        last_error: ApiRequestError | None = None
+        for base_url in (OTM_BASE_URL, OTM_FALLBACK_BASE_URL):
+            try:
+                raw = self._authorized("GET", f"{base_url}{path}")
+                break
+            except ApiRequestError as exc:
+                last_error = exc
+                if base_url != OTM_BASE_URL or not exc.status or exc.status < 500:
+                    raise
+        if raw is None:
+            raise last_error or ApiRequestError("OneLap FIT download failed")
+        if len(raw) < 12 or raw[8:12] != b".FIT":
+            raise ApiRequestError("OneLap FIT endpoint returned invalid content")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("wb") as file:
+                file.write(raw)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return "downloaded"
+
+
+def otm_fit_filename(record: dict[str, Any]) -> str:
+    started = int(record.get("start_time") or 0)
+    stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(started))
+    record_id = (safe_filename(str(record.get("id") or "activity")) or "activity")[:80]
+    return f"ONELAP_{stamp}_{record_id}.fit"
 
 
 def read_har(path: Path) -> dict[str, Any]:

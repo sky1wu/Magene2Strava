@@ -1,0 +1,21 @@
+name: magene2strava
+
+services:
+  app:
+    image: ghcr.io/sky1wu/magene2strava:latest
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8848:8848"
+    volumes:
+      - ./magene2strava-data:/data
+    environment:
+      TZ: ${TZ:-Asia/Hong_Kong}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
