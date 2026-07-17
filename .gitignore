@@ -1,0 +1,11 @@
+*.har
+fits/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.onelap_token.json
+.strava_auth.json
+.strava_web_session.json
+.strava_sync_state.json
+.dashboard_cache.json

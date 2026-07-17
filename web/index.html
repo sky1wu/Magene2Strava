@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3ef">
+  <meta name="description" content="Magene2Strava 本地骑行数据同步工作台">
+  <title>Magene2Strava</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace">跳到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#connections" aria-label="Magene2Strava 首页">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 44 44" role="img"><path d="M8 30c8-2 6-18 16-18 7 0 6 10 12 12"/><circle cx="8" cy="31" r="4"/><circle cx="36" cy="25" r="4"/></svg>
+        </span>
+        <span><strong>Magene2Strava</strong><small>LOCAL SYNC</small></span>
+      </a>
+
+      <nav class="nav-list">
+        <a class="nav-item is-active" href="#connections" data-nav="connections">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15 15 9M7 17l-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0M17 7l1-1a3 3 0 0 1 4 4l-4 4a3 3 0 0 1-4 0"/></svg>
+          <span>连接</span>
+        </a>
+        <a class="nav-item" href="#overview" data-nav="overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>
+          <span>总览</span>
+        </a>
+        <a class="nav-item" href="#activities" data-nav="activities">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17 9 9l4 5 3-4 4 7H4Z"/><path d="M4 20h16"/></svg>
+          <span>活动</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        <div><strong>本地运行</strong><small>凭据不会离开此设备</small></div>
+      </div>
+    </aside>
+
+    <main id="workspace" class="workspace" tabindex="-1">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menuButton" type="button" aria-label="打开导航" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <div>
+          <p class="eyebrow" id="dateLabel">训练工作台</p>
+          <h1>同步总览</h1>
+        </div>
+        <div class="top-actions">
+          <span class="freshness" id="freshness"><i></i>正在读取本地数据</span>
+          <button class="button button-quiet" id="refreshButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+            刷新数据
+          </button>
+          <button class="button button-primary" id="syncButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 4-4 4 4M12 8v9M5 20h14"/></svg>
+            开始同步
+          </button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section id="connections" class="connections-section section-enter" aria-labelledby="connectionsTitle">
+          <div class="block-heading">
+            <div><p class="eyebrow">数据链路</p><h2 id="connectionsTitle">连接状态</h2></div>
+            <p class="section-note">所有授权信息只保存在本机目录。</p>
+          </div>
+          <div class="connection-list" id="connectionList" aria-live="polite"></div>
+        </section>
+
+        <section id="overview" class="overview-section section-enter" aria-labelledby="overviewTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">历史累计</p>
+              <h2 id="overviewTitle">全部骑行数据</h2>
+            </div>
+            <div class="sync-score" aria-label="同步完成率">
+              <span id="syncRate">—</span>
+              <small>同步完成率</small>
+            </div>
+          </div>
+
+          <div class="metric-row" aria-live="polite">
+            <article class="metric">
+              <span class="metric-label">骑行距离</span>
+              <strong><span id="distanceMetric">—</span><small> km</small></strong>
+              <span class="metric-note" id="rideCountMetric">共 — 次活动</span>
+            </article>
+            <article class="metric">
+              <span class="metric-label">运动时间</span>
+              <strong id="durationMetric">—</strong>
+              <span class="metric-note">累计有效骑行时长</span>
+            </article>
+            <article class="metric">
+              <span class="metric-label">累计爬升</span>
+              <strong><span id="elevationMetric">—</span><small> m</small></strong>
+              <span class="metric-note">累计海拔增益</span>
+            </article>
+            <article class="metric metric-accent">
+              <span class="metric-label">待处理</span>
+              <strong id="queuedMetric">—</strong>
+              <span class="metric-note" id="errorMetric">队列状态正常</span>
+            </article>
+          </div>
+
+          <div class="trend-layout">
+            <div class="trend-main">
+              <div class="block-heading">
+                <div>
+                  <p class="eyebrow">近八周</p>
+                  <h3>骑行负荷趋势</h3>
+                </div>
+                <div class="legend"><i></i><span>周距离</span><strong id="weeklyTotal">—</strong></div>
+              </div>
+              <div class="chart-wrap" id="chartWrap">
+                <svg id="trendChart" class="trend-chart" viewBox="0 0 820 250" role="img" aria-label="近八周骑行距离趋势图"></svg>
+                <div class="chart-tooltip" id="chartTooltip" hidden></div>
+                <div class="empty-state" id="chartEmpty" hidden>
+                  <strong>等待完整训练数据</strong>
+                  <span>刷新顽鹿数据后，这里会生成趋势图。</span>
+                </div>
+              </div>
+            </div>
+
+            <aside class="route-panel" aria-labelledby="routeTitle">
+              <div class="block-heading">
+                <div><p class="eyebrow">最新有轨迹活动</p><h3 id="routeTitle">真实 FIT 轨迹</h3></div>
+                <span class="route-date" id="routeDate">—</span>
+              </div>
+              <div class="route-visual">
+                <svg id="routeCanvas" viewBox="0 0 360 220" role="img" aria-label="最新活动的真实 FIT GPS 轨迹"></svg>
+                <div class="route-key" id="routeKey" hidden><span class="start"></span>起点<span class="end"></span>终点</div>
+                <div class="route-empty" id="routeEmpty" hidden>
+                  <strong>暂无 GPS 轨迹</strong>
+                  <span>未找到与活动匹配的本地 FIT 轨迹。</span>
+                </div>
+              </div>
+              <div class="route-stats">
+                <div><span>距离</span><strong id="latestDistance">—</strong></div>
+                <div><span>时长</span><strong id="latestDuration">—</strong></div>
+                <div><span>GPS 采样</span><strong id="latestPoints">—</strong></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="activities" class="activities-section section-enter" aria-labelledby="activityTitle">
+          <div class="block-heading activity-heading">
+            <div><p class="eyebrow">活动记录</p><h2 id="activityTitle">最近骑行</h2></div>
+            <div class="activity-tools">
+              <label class="search-field">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <span class="sr-only">搜索活动</span>
+                <input id="searchInput" type="search" placeholder="搜索活动" autocomplete="off">
+              </label>
+              <label class="select-field">
+                <span class="sr-only">筛选同步状态</span>
+                <select id="statusFilter">
+                  <option value="all">全部状态</option>
+                  <option value="synced">已同步</option>
+                  <option value="queued">待同步</option>
+                  <option value="error">异常</option>
+                  <option value="local">仅本地</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="activity-table" role="table" aria-label="骑行活动列表">
+            <div class="table-head" role="row">
+              <span role="columnheader">活动</span><span role="columnheader">距离</span><span role="columnheader">时长</span><span role="columnheader">状态</span>
+            </div>
+            <div id="activityList" class="activity-list"></div>
+          </div>
+          <button class="load-more" id="loadMoreButton" type="button" hidden>显示更多活动</button>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <div class="mobile-overlay" id="mobileOverlay" hidden></div>
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+  <dialog class="sync-dialog" id="syncDialog" aria-labelledby="syncDialogTitle">
+    <form method="dialog">
+      <button class="dialog-close" value="cancel" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+      <p class="eyebrow">上传到 Strava</p>
+      <h2 id="syncDialogTitle">确认本次同步</h2>
+      <p class="dialog-copy">系统会优先处理最新且尚未同步的骑行。重复活动会被自动跳过。</p>
+      <label class="quantity-field">
+        <span>本次最多同步</span>
+        <span><input id="uploadLimit" type="number" min="1" max="100" value="15" inputmode="numeric"> 条</span>
+      </label>
+      <div class="dialog-summary">
+        <div><span>待同步</span><strong id="dialogQueued">—</strong></div>
+        <div><span>异常记录</span><strong id="dialogErrors">—</strong></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="button button-quiet" id="previewButton" type="button">仅检查计划</button>
+        <button class="button button-primary" id="confirmSyncButton" type="button">确认并同步</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="job-dialog" id="jobDialog" aria-labelledby="jobDialogTitle">
+    <form method="dialog">
+      <button class="dialog-close" id="jobCloseButton" value="cancel" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+      <div class="job-heading">
+        <span class="job-spinner" id="jobSpinner" aria-hidden="true"></span>
+        <div><p class="eyebrow" id="jobEyebrow">同步进行中</p><h2 id="jobDialogTitle">正在处理骑行数据</h2></div>
+      </div>
+      <div class="job-progress"><span id="jobProgressBar"></span></div>
+      <pre class="job-log" id="jobLog" tabindex="0">正在启动…</pre>
+      <button class="button button-primary job-done" id="jobDoneButton" value="cancel" hidden>完成</button>
+    </form>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
