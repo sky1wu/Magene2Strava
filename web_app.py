@@ -28,11 +28,12 @@ import download_latest_fit as onelap
 import sync_to_strava as sync
 
 
-ROOT = Path(__file__).resolve().parent
-WEB_ROOT = ROOT / "web"
-CACHE_PATH = ROOT / ".dashboard_cache.json"
-STATE_PATH = ROOT / sync.SYNC_STATE
-FIT_DIR = ROOT / "fits"
+APP_ROOT = Path(__file__).resolve().parent
+DATA_ROOT = Path(os.environ.get("MAGENE2STRAVA_DATA_DIR", APP_ROOT)).expanduser().resolve()
+WEB_ROOT = APP_ROOT / "web"
+CACHE_PATH = DATA_ROOT / ".dashboard_cache.json"
+STATE_PATH = DATA_ROOT / sync.SYNC_STATE
+FIT_DIR = DATA_ROOT / "fits"
 FINAL_STATUSES = sync.FINAL_STATUSES
 FIT_NAME = re.compile(
     r"^(?P<device>.+?)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})(?:_.+)?\.fit$",
@@ -244,11 +245,11 @@ def latest_fit_route(activities: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def connection_status() -> list[dict[str, Any]]:
-    token = read_json(ROOT / onelap.TOKEN_CACHE, {})
+    token = read_json(DATA_ROOT / onelap.TOKEN_CACHE, {})
     expiry = integer(token.get("expires_at"))
     onelap_ok = expiry > int(time.time()) + 60
 
-    web_session = read_json(ROOT / sync.STRAVA_WEB_SESSION, {})
+    web_session = read_json(DATA_ROOT / sync.STRAVA_WEB_SESSION, {})
     cookie_count = len(web_session.get("cookies", [])) if isinstance(web_session.get("cookies"), list) else 0
     strava_ok = cookie_count > 0
 
@@ -342,7 +343,7 @@ class DashboardService:
             raise RuntimeError("数据刷新正在进行，请稍候")
         try:
             headers, auth_source = onelap.obtain_auth(
-                ROOT / onelap.TOKEN_CACHE, None, None, 30.0
+                DATA_ROOT / onelap.TOKEN_CACHE, None, None, 30.0
             )
             records = sync.onelap_records(headers, 30.0)
             state = read_json(STATE_PATH, {"version": 1, "records": {}})
@@ -372,7 +373,7 @@ class JobManager:
             if active:
                 raise RuntimeError("已有同步任务正在运行")
             job_id = uuid.uuid4().hex[:12]
-            command = [sys.executable, str(ROOT / "sync_to_strava.py")]
+            command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
             if mode == "preview":
                 command.append("--dry-run")
             else:
@@ -396,7 +397,7 @@ class JobManager:
         try:
             process = subprocess.Popen(
                 command,
-                cwd=ROOT,
+                cwd=DATA_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -562,6 +563,12 @@ def main() -> int:
     args = parse_args()
     if not WEB_ROOT.is_dir():
         print(f"error: web assets not found: {WEB_ROOT}", file=sys.stderr)
+        return 1
+    try:
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        os.chdir(DATA_ROOT)
+    except OSError as exc:
+        print(f"error: cannot use data directory {DATA_ROOT}: {exc}", file=sys.stderr)
         return 1
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     server.quiet = args.quiet  # type: ignore[attr-defined]

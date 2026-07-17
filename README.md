@@ -11,6 +11,29 @@ python web_app.py --open
 
 浏览器会打开 `http://127.0.0.1:8848`。如未自动打开，手动访问该地址即可。
 
+## Docker
+
+镜像发布在 GHCR：`ghcr.io/sky1wu/magene2strava:latest`。
+
+```powershell
+New-Item -ItemType Directory -Force magene2strava-data
+docker pull ghcr.io/sky1wu/magene2strava:latest
+docker run --rm --name magene2strava `
+  -p 127.0.0.1:8848:8848 `
+  -v "${PWD}/magene2strava-data:/data" `
+  ghcr.io/sky1wu/magene2strava:latest
+```
+
+打开 `http://127.0.0.1:8848`。`/data` 用于持久化 FIT 文件、授权、同步状态和页面缓存；不要把端口直接暴露到公网。
+
+如需沿用本机授权，停止容器后将以下文件复制到 `magene2strava-data`：
+
+- `.onelap_token.json`
+- `.strava_web_session.json`
+- `.strava_auth.json`（仅 Strava API 模式需要）
+
+镜像支持 `linux/amd64` 与 `linux/arm64`。每次推送到 `main` 都会自动发布 `latest` 和对应的 `sha-*` 标签；推送 `v*` 标签时还会发布版本号标签。
+
 ## 使用流程
 
 1. 点击“刷新数据”读取顽鹿活动与训练指标。

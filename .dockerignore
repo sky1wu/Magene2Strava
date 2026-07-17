@@ -1,0 +1,7 @@
+*
+!requirements.txt
+!download_latest_fit.py
+!sync_to_strava.py
+!web_app.py
+!web/
+!web/**
