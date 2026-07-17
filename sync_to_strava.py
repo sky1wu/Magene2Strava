@@ -844,7 +844,17 @@ def progress_label(index: int, total: int) -> str:
     return f"[{index:>{width}}/{total} {percent:5.1f}%]"
 
 
-def fetch_onelap_records(args: argparse.Namespace) -> tuple[dict[str, str], str, list[dict[str, Any]]]:
+def fetch_onelap_records(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str] | onelap.OneLapOtmClient, str, list[dict[str, Any]]]:
+    direct_path = Path(args.onelap_auth)
+    if direct_path.is_file():
+        direct = onelap.OneLapOtmClient(direct_path, args.timeout)
+        records = direct.records()
+        if not records:
+            raise SyncError("Onelap returned no activity records")
+        return direct, direct.source, records
+
     headers, auth_source = onelap.obtain_auth(
         Path(args.onelap_token_cache), args.har, args.login_har, args.timeout
     )
@@ -862,6 +872,31 @@ def fetch_onelap_records(args: argparse.Namespace) -> tuple[dict[str, str], str,
     if not records:
         raise SyncError("Onelap returned no activity records")
     return headers, auth_source, records
+
+
+def onelap_fit_info(
+    source: dict[str, str] | onelap.OneLapOtmClient,
+    record: dict[str, Any],
+    timeout: float,
+) -> tuple[str, str | None]:
+    if isinstance(source, onelap.OneLapOtmClient):
+        return onelap.otm_fit_filename(record), None
+    url, filename = onelap.fit_link(str(record["id"]), source, timeout)
+    return filename, url
+
+
+def download_onelap_fit(
+    source: dict[str, str] | onelap.OneLapOtmClient,
+    record: dict[str, Any],
+    reference: str | None,
+    target: Path,
+    timeout: float,
+) -> str:
+    if isinstance(source, onelap.OneLapOtmClient):
+        return source.download_record_fit(str(record["id"]), target, force=False)
+    if not reference:
+        raise SyncError("Onelap FIT download URL is missing")
+    return onelap.download_fit(reference, target, timeout, force=False)
 
 
 def mark_uploaded_before(args: argparse.Namespace, date_text: str) -> None:
@@ -918,7 +953,7 @@ def sync_web_batches(
     synced: dict[str, Any],
     state: dict[str, Any],
     state_path: Path,
-    headers: dict[str, str],
+    onelap_source: dict[str, str] | onelap.OneLapOtmClient,
     external_ids: set[str],
     output_dir: Path,
     args: argparse.Namespace,
@@ -1002,7 +1037,7 @@ def sync_web_batches(
         for record in selected:
             record_id = str(record["id"])
             try:
-                url, filename = onelap.fit_link(record_id, headers, args.timeout)
+                filename, reference = onelap_fit_info(onelap_source, record, args.timeout)
                 expected_external_id = f"onelap-{record_id}.fit"
                 if filename.lower() in external_ids or expected_external_id.lower() in external_ids:
                     synced[record_id] = {
@@ -1017,7 +1052,9 @@ def sync_web_batches(
                     )
                     continue
                 fit_path = output_dir / filename
-                onelap.download_fit(url, fit_path, args.timeout, force=False)
+                download_onelap_fit(
+                    onelap_source, record, reference, fit_path, args.timeout
+                )
                 prepared.append(
                     (
                         record,
@@ -1127,6 +1164,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--har", help="HAR containing an authenticated Onelap request")
     parser.add_argument("--login-har", help="HAR containing the Onelap login request")
+    parser.add_argument(
+        "--onelap-auth",
+        default=onelap.DIRECT_AUTH_CACHE,
+        help=f"OneLap account login file (default: {onelap.DIRECT_AUTH_CACHE})",
+    )
     parser.add_argument("--onelap-token-cache", default=onelap.TOKEN_CACHE)
     return parser.parse_args()
 
@@ -1158,7 +1200,7 @@ def main() -> int:
             )
         else:
             client = StravaClient(strava_config, args.timeout)
-        headers, auth_source, records = fetch_onelap_records(args)
+        onelap_source, auth_source, records = fetch_onelap_records(args)
 
         earliest = min(int(record.get("start_time", 0)) for record in records) - 86400
         activities = client.activities(earliest, int(time.time()) + 86400)
@@ -1223,7 +1265,7 @@ def main() -> int:
                 synced,
                 state,
                 state_path,
-                headers,
+                onelap_source,
                 external_ids,
                 output_dir,
                 args,
@@ -1248,7 +1290,9 @@ def main() -> int:
                 else:
                     if args.max_uploads and submitted >= args.max_uploads:
                         break
-                    url, filename = onelap.fit_link(record_id, headers, args.timeout)
+                    filename, reference = onelap_fit_info(
+                        onelap_source, record, args.timeout
+                    )
                     expected_external_id = f"onelap-{record_id}.fit"
                     if filename.lower() in external_ids or expected_external_id.lower() in external_ids:
                         synced[record_id] = {
@@ -1261,7 +1305,9 @@ def main() -> int:
                         print(f"{prefix} SKIPPED   | {label} | already exists")
                         continue
                     fit_path = output_dir / filename
-                    onelap.download_fit(url, fit_path, args.timeout, force=False)
+                    download_onelap_fit(
+                        onelap_source, record, reference, fit_path, args.timeout
+                    )
                     upload = client.create_upload(
                         fit_path,
                         expected_external_id,

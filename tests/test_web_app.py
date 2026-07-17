@@ -10,6 +10,84 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
+    def test_preferred_strava_mode_prioritizes_web_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_path = root / "web.json"
+            config_path = root / "api.json"
+            session_path.write_text(
+                json.dumps({"cookies": [{"name": "session", "value": "secret"}]}),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "client_id": "1",
+                        "client_secret": "secret",
+                        "refresh_token": "refresh",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(web_app, "STRAVA_WEB_SESSION_PATH", session_path),
+                patch.object(web_app, "STRAVA_CONFIG_PATH", config_path),
+            ):
+                self.assertEqual(web_app.preferred_strava_mode(), "web")
+                session_path.unlink()
+                self.assertEqual(web_app.preferred_strava_mode(), "api")
+
+    def test_onelap_har_import_retains_only_login_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            retained_path = root / "onelap_auth.har"
+            login_request = {
+                "url": f"https://{web_app.onelap.API_HOST}{web_app.onelap.LOGIN_PATH}",
+                "method": "POST",
+                "headers": [{"name": "Content-Type", "value": "application/json"}],
+                "postData": {"text": '{"account":"encrypted","password":"hash"}'},
+            }
+            har = {
+                "log": {
+                    "entries": [
+                        {
+                            "startedDateTime": "2026-07-18T00:00:00Z",
+                            "request": login_request,
+                            "response": {"content": {"text": "sensitive response"}},
+                        },
+                        {"request": {"url": "https://example.com/private"}},
+                    ]
+                }
+            }
+
+            def fake_auth(cache_path, *_args, **_kwargs):
+                web_app.sync.save_json(
+                    cache_path,
+                    {"token": "token", "uid": "uid", "expires_at": 9_999_999_999},
+                )
+                return {"Authorization": "token"}, "login"
+
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "ONELAP_HAR_PATH", retained_path),
+                patch.object(web_app.onelap, "obtain_auth", side_effect=fake_auth),
+                patch.object(web_app.onelap, "newest_record", return_value={"id": "ride"}),
+            ):
+                source = web_app.AuthService().import_onelap_har(har)
+
+            retained = json.loads(retained_path.read_text(encoding="utf-8"))
+            entries = retained["log"]["entries"]
+            self.assertEqual(source, "login")
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["request"], login_request)
+            self.assertNotIn("response", entries[0])
+
+    def test_onelap_har_import_requires_login_request(self) -> None:
+        har = {"log": {"entries": [{"request": {"url": "https://example.com"}}]}}
+
+        with self.assertRaisesRegex(ValueError, "登录请求"):
+            web_app.AuthService().import_onelap_har(har)
+
     def test_clean_activity_merges_sync_state(self) -> None:
         record = {
             "id": "ride-1",

@@ -47,14 +47,16 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
 button,
 a,
 input,
-select {
+select,
+textarea {
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -62,6 +64,7 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid rgba(252, 76, 2, 0.25);
   outline-offset: 3px;
@@ -1134,7 +1137,7 @@ svg {
 .connection-state {
   width: 8px;
   height: 8px;
-  margin-left: auto;
+  margin-left: 0;
   border-radius: 50%;
   background: var(--success);
   box-shadow: 0 0 0 4px rgba(29, 138, 98, 0.1);
@@ -1143,6 +1146,31 @@ svg {
 .connection-state.attention {
   background: var(--warning);
   box-shadow: 0 0 0 4px rgba(184, 117, 23, 0.1);
+}
+
+.connection-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.connection-action {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.connection-action:hover {
+  border-color: var(--line-strong);
+  background: white;
 }
 
 .toast-region {
@@ -1307,6 +1335,139 @@ dialog h2 {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+}
+
+.auth-dialog {
+  width: min(590px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.auth-panel {
+  margin-top: 10px;
+}
+
+.onelap-fields {
+  display: grid;
+  gap: 14px;
+}
+
+.form-field,
+.file-field {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.form-field input,
+.form-field textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: white;
+  color: var(--ink);
+}
+
+.form-field input {
+  height: 42px;
+  padding: 0 12px;
+}
+
+.form-field textarea {
+  min-height: 92px;
+  padding: 11px 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.form-field small,
+.file-field small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.file-field {
+  padding: 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.file-field.compact {
+  padding: 13px 16px;
+}
+
+.file-field input {
+  width: 100%;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.file-field input::file-selector-button {
+  margin-right: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: white;
+  color: var(--ink);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 0 14px;
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+  content: "";
+}
+
+.oauth-details {
+  margin-top: 22px;
+  padding-top: 17px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.oauth-details summary {
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.oauth-details p {
+  margin: 10px 0 14px;
+}
+
+.oauth-fields {
+  display: grid;
+  grid-template-columns: 0.7fr 1.3fr;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .job-dialog {
@@ -1633,6 +1794,14 @@ dialog h2 {
 
   .dialog-actions .button {
     width: 100%;
+  }
+
+  .auth-actions .button {
+    width: 100%;
+  }
+
+  .oauth-fields {
+    grid-template-columns: 1fr;
   }
 }
 

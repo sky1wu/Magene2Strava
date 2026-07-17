@@ -29,6 +29,21 @@ const els = {
   activityList: document.querySelector("#activityList"),
   loadMoreButton: document.querySelector("#loadMoreButton"),
   connectionList: document.querySelector("#connectionList"),
+  authDialog: document.querySelector("#authDialog"),
+  authDialogEyebrow: document.querySelector("#authDialogEyebrow"),
+  authDialogTitle: document.querySelector("#authDialogTitle"),
+  onelapAuthPanel: document.querySelector("#onelapAuthPanel"),
+  onelapAccountInput: document.querySelector("#onelapAccountInput"),
+  onelapPasswordInput: document.querySelector("#onelapPasswordInput"),
+  onelapAuthButton: document.querySelector("#onelapAuthButton"),
+  stravaAuthPanel: document.querySelector("#stravaAuthPanel"),
+  stravaCookieInput: document.querySelector("#stravaCookieInput"),
+  stravaCookieButton: document.querySelector("#stravaCookieButton"),
+  stravaHarInput: document.querySelector("#stravaHarInput"),
+  stravaHarButton: document.querySelector("#stravaHarButton"),
+  stravaClientId: document.querySelector("#stravaClientId"),
+  stravaClientSecret: document.querySelector("#stravaClientSecret"),
+  stravaOauthButton: document.querySelector("#stravaOauthButton"),
   menuButton: document.querySelector("#menuButton"),
   sidebar: document.querySelector(".sidebar"),
   mobileOverlay: document.querySelector("#mobileOverlay"),
@@ -81,6 +96,99 @@ function showToast(message, type = "success") {
   toast.textContent = message;
   els.toastRegion.append(toast);
   window.setTimeout(() => toast.remove(), 4300);
+}
+
+async function readHar(input) {
+  const file = input.files?.[0];
+  if (!file) throw new Error("请先选择 HAR 文件");
+  if (file.size > 12 * 1024 * 1024) throw new Error("HAR 文件不能超过 12 MB");
+  try {
+    const value = JSON.parse(await file.text());
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    return value;
+  } catch {
+    throw new Error("HAR 文件不是有效的 JSON");
+  }
+}
+
+async function runAuthAction(button, pendingLabel, action) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = pendingLabel;
+  try {
+    await action();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function openAuthDialog(provider) {
+  const onelap = provider === "onelap";
+  els.onelapAuthPanel.hidden = !onelap;
+  els.stravaAuthPanel.hidden = onelap;
+  els.authDialogEyebrow.textContent = onelap ? "顽鹿运动" : "Strava";
+  els.authDialogTitle.textContent = onelap ? "配置自动登录" : "更新 Web 会话";
+  els.authDialog.showModal();
+}
+
+async function loginOnelap() {
+  await runAuthAction(els.onelapAuthButton, "正在登录…", async () => {
+    const account = els.onelapAccountInput.value.trim();
+    const password = els.onelapPasswordInput.value;
+    if (!account || !password) throw new Error("请输入顽鹿账号和密码");
+    await request("/api/auth/onelap/login", {
+      method: "POST",
+      body: JSON.stringify({ account, password }),
+    });
+    els.authDialog.close();
+    els.onelapPasswordInput.value = "";
+    await loadDashboard();
+    showToast("顽鹿账号登录已配置");
+  });
+}
+
+async function importStravaCookie() {
+  await runAuthAction(els.stravaCookieButton, "正在验证…", async () => {
+    await request("/api/auth/strava/web-session", {
+      method: "POST",
+      body: JSON.stringify({ cookie_header: els.stravaCookieInput.value }),
+    });
+    els.authDialog.close();
+    els.stravaCookieInput.value = "";
+    await loadDashboard();
+    showToast("Strava Web 会话已保存");
+  });
+}
+
+async function importStravaHar() {
+  await runAuthAction(els.stravaHarButton, "正在提取…", async () => {
+    const har = await readHar(els.stravaHarInput);
+    await request("/api/auth/strava/har", {
+      method: "POST",
+      body: JSON.stringify({ har }),
+    });
+    els.authDialog.close();
+    els.stravaHarInput.value = "";
+    await loadDashboard();
+    showToast("已从 HAR 保存 Strava Web 会话");
+  });
+}
+
+async function startStravaOauth() {
+  await runAuthAction(els.stravaOauthButton, "正在跳转…", async () => {
+    const result = await request("/api/auth/strava/start", {
+      method: "POST",
+      body: JSON.stringify({
+        client_id: els.stravaClientId.value.trim(),
+        client_secret: els.stravaClientSecret.value.trim(),
+        redirect_uri: `${window.location.origin}/api/auth/strava/callback`,
+      }),
+    });
+    window.location.assign(result.authorization_url);
+  });
 }
 
 function formatDuration(seconds, compact = false) {
@@ -418,7 +526,18 @@ function renderConnections(connections) {
     const state = document.createElement("span");
     state.className = `connection-state ${connection.status}`;
     state.title = connection.status === "connected" ? "连接正常" : "需要处理";
-    item.append(logo, copy, state);
+    const controls = document.createElement("span");
+    controls.className = "connection-controls";
+    controls.append(state);
+    if (connection.action && ["onelap", "strava"].includes(connection.id)) {
+      const action = document.createElement("button");
+      action.className = "connection-action";
+      action.type = "button";
+      action.textContent = connection.action;
+      action.addEventListener("click", () => openAuthDialog(connection.id));
+      controls.append(action);
+    }
+    item.append(logo, copy, controls);
     els.connectionList.append(item);
   }
 }
@@ -548,6 +667,14 @@ function setup() {
   els.menuButton.addEventListener("click", () => toggleMenu());
   els.mobileOverlay.addEventListener("click", () => toggleMenu(false));
   els.jobDoneButton.addEventListener("click", () => { app.activeJob = null; window.clearTimeout(app.jobTimer); });
+  els.onelapAuthButton.addEventListener("click", loginOnelap);
+  els.stravaCookieButton.addEventListener("click", importStravaCookie);
+  els.stravaHarButton.addEventListener("click", importStravaHar);
+  els.stravaOauthButton.addEventListener("click", startStravaOauth);
+  const authResult = new URLSearchParams(window.location.search);
+  if (authResult.get("auth") === "strava-success") showToast("Strava API OAuth 授权成功");
+  if (authResult.get("auth") === "strava-error") showToast(authResult.get("message") || "Strava 授权失败", "error");
+  if (authResult.has("auth")) window.history.replaceState({}, "", window.location.pathname + window.location.hash);
   setupNavigation();
   loadDashboard();
 }
