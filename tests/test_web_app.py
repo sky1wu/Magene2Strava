@@ -270,6 +270,27 @@ class WebAppTests(unittest.TestCase):
                 FakeClient(), records, {}
             )
 
+    def test_enrich_direct_records_leaves_unrepaired_metrics_pending(self) -> None:
+        class FakeClient:
+            def record_detail(self, _record_id):
+                return {"elevation": 42, "cal": 300, "totalDistance": 0, "time": 0}
+
+        records = [{
+            "id": "missing",
+            "name": "骑行训练",
+            "start_time": 200,
+            "total_distance": 0,
+            "total_time": 0,
+        }]
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            FakeClient(), records, {}
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(records[0]["elevation"], 42)
+        self.assertFalse(records[0].get("details_enriched", False))
+
     def test_har_refresh_keeps_cache_marked_unenriched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

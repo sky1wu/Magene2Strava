@@ -633,6 +633,13 @@ class DashboardService:
                     detail_name = str(detail.get("name") or detail.get("title") or "").strip()
                     if detail_name:
                         record["name"] = detail_name
+                    if (
+                        number(record.get("total_distance")) <= 0
+                        or number(record.get("total_time")) <= 0
+                    ):
+                        raise onelap.ApiRequestError(
+                            "OneLap activity detail did not repair required metrics"
+                        )
                     record["details_enriched"] = True
                 except onelap.AuthenticationError:
                     raise
