@@ -555,6 +555,7 @@ class OneLapOtmClient:
                             for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
                                 if detail_normalized[key] > 0:
                                     normalized[key] = detail_normalized[key]
+                            normalized["details_enriched"] = True
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
                             raise

@@ -38,7 +38,7 @@ docker run --rm --name magene2strava `
 
 ### Docker Compose
 
-项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并使用 Docker 命名卷 `magene2strava-data` 保存数据，避免 Linux/NAS 上绑定目录的权限问题：
+项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并继续将数据保存在当前目录的 `magene2strava-data`，升级后会直接沿用已有授权、同步状态和 FIT 文件：
 
 ```powershell
 docker compose up -d
@@ -53,7 +53,7 @@ docker compose logs -f
 docker compose down
 ```
 
-查看命名卷：`docker volume inspect magene2strava_magene2strava-data`。如需迁移授权或 FIT 文件，请在容器停止后通过临时容器复制卷内数据。
+Linux/NAS 新安装如需避免绑定目录权限差异，可在项目目录的 `.env` 中设置 `MAGENE2STRAVA_DATA_SOURCE=magene2strava-data`，改用 Compose 命名卷；已有安装请保持默认值，以继续读取原目录数据。
 
 如需修改宿主机端口，请修改 `compose.yaml` 中端口映射左侧的 `8848`：
 

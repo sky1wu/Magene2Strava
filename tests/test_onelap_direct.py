@@ -214,6 +214,7 @@ class OneLapDirectTests(unittest.TestCase):
         self.assertEqual(records[0]["total_distance"], 42000)
         self.assertEqual(records[0]["total_time"], 5400)
         self.assertEqual(records[0]["id"], "456")
+        self.assertTrue(records[0]["details_enriched"])
 
     def test_otm_records_supports_current_list_metrics_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

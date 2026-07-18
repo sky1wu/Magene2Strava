@@ -98,6 +98,7 @@ def clean_activity(record: dict[str, Any], states: dict[str, Any]) -> dict[str, 
         "elevation_m": round(number(record.get("elevation")), 1),
         "calories": round(number(record.get("cal")), 0),
         "tss": round(number(record.get("TSS")), 1),
+        "details_enriched": record.get("details_enriched") is True,
         "status": status,
         "activity_id": str(state.get("activity_id") or ""),
         "error": str(state.get("error") or ""),
@@ -573,14 +574,24 @@ class DashboardService:
         total = len(records)
         for index, record in enumerate(records, 1):
             cached = cached_by_id.get(str(record.get("id")))
-            can_reuse = bool(cached and cache_complete)
-            if can_reuse and cached:
+            record_complete = record.get("details_enriched") is True
+            can_reuse = bool(
+                cached
+                and (
+                    cache_complete
+                    or cached.get("details_enriched") is True
+                )
+            )
+            if record_complete:
+                pass
+            elif can_reuse and cached:
                 record["elevation"] = number(cached.get("elevation_m"))
                 record["cal"] = number(cached.get("calories"))
                 if number(record.get("TSS")) <= 0:
                     record["TSS"] = number(cached.get("tss"))
                 if record.get("name") in {None, "", "骑行训练"} and cached.get("name"):
                     record["name"] = str(cached["name"])
+                record["details_enriched"] = True
             else:
                 try:
                     detail = direct.record_detail(str(record["id"]))
@@ -599,6 +610,7 @@ class DashboardService:
                     detail_name = str(detail.get("name") or detail.get("title") or "").strip()
                     if detail_name:
                         record["name"] = detail_name
+                    record["details_enriched"] = True
                 except onelap.DownloadError as exc:
                     failures += 1
                     if "risk control" in str(exc).lower():
@@ -657,7 +669,7 @@ class DashboardService:
                         force_login=True,
                     )
                     records = sync.onelap_records(headers, 30.0)
-                details_enriched = True
+                details_enriched = False
             state = read_json(STATE_PATH, {"version": 1, "records": {}})
             states = state.get("records", {})
             if not isinstance(states, dict):
