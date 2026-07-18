@@ -538,6 +538,8 @@ class OneLapOtmClient:
                 if normalized and (
                     normalized["total_distance"] <= 0 or normalized["total_time"] <= 0
                 ):
+                    missing_distance = normalized["total_distance"] <= 0
+                    missing_time = normalized["total_time"] <= 0
                     try:
                         detail = self.record_detail(str(normalized["id"]))
                         # Detail data contains a device/user numeric `id` which is
@@ -560,7 +562,11 @@ class OneLapOtmClient:
                             ).strip()
                             if fit_reference:
                                 normalized["fit_reference"] = fit_reference
-                            normalized["details_enriched"] = True
+                            repaired_required_metrics = (
+                                not missing_distance or normalized["total_distance"] > 0
+                            ) and (not missing_time or normalized["total_time"] > 0)
+                            if repaired_required_metrics:
+                                normalized["details_enriched"] = True
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
                             raise

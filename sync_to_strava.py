@@ -904,6 +904,14 @@ def download_onelap_fit(
     return onelap.download_fit(reference, target, timeout, force=False)
 
 
+def raise_onelap_risk_control(error: Exception) -> None:
+    if not isinstance(error, onelap.DownloadError):
+        return
+    normalized_error = str(error).lower()
+    if "risk control" in normalized_error or "风控" in normalized_error:
+        raise error
+
+
 def mark_uploaded_before(args: argparse.Namespace, date_text: str) -> None:
     try:
         cutoff = datetime.strptime(date_text, "%Y-%m-%d").replace(
@@ -1069,6 +1077,7 @@ def sync_web_batches(
                     )
                 )
             except (SyncError, onelap.DownloadError) as exc:
+                raise_onelap_risk_control(exc)
                 fail_record(record, exc)
         if not prepared:
             continue
@@ -1351,6 +1360,7 @@ def main() -> int:
             except (RateLimitError, WebSessionExpiredError):
                 raise
             except (SyncError, onelap.DownloadError) as exc:
+                raise_onelap_risk_control(exc)
                 failed += 1
                 synced[record_id] = {
                     "status": "error",

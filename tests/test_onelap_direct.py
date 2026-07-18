@@ -218,6 +218,40 @@ class OneLapDirectTests(unittest.TestCase):
         self.assertEqual(records[0]["fit_reference"], "cached.fit")
         self.assertTrue(records[0]["details_enriched"])
 
+    def test_otm_records_leave_unrepaired_metrics_unenriched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "c" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            list_response = {
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": "missing",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "totalDistance": 0,
+                        "time": 0,
+                    }]
+                },
+            }
+
+            with (
+                patch.object(client, "_authorized_json", return_value=list_response),
+                patch.object(
+                    client,
+                    "record_detail",
+                    return_value={"totalDistance": 0, "time": 0},
+                ),
+            ):
+                records = client.records(max_pages=1)
+
+        self.assertEqual(records[0]["total_distance"], 0)
+        self.assertEqual(records[0]["total_time"], 0)
+        self.assertFalse(records[0].get("details_enriched", False))
+
     def test_download_record_fit_reuses_preserved_detail_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
