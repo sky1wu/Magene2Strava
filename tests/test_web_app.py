@@ -345,6 +345,42 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(lines[-1][1], 100)
         self.assertIn("新增 1", lines[-1][0])
 
+    def test_download_all_fits_stops_on_risk_control(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def records(self, progress=None):
+                return [
+                    {"id": "one", "name": "活动一", "start_time": 1_720_000_001},
+                    {"id": "two", "name": "活动二", "start_time": 1_720_000_002},
+                ]
+
+            def download_record_fit(
+                self, record_id, target, force=False, fit_reference=None
+            ):
+                self.requested.append(record_id)
+                raise web_app.onelap.ApiRequestError(
+                    "OneLap risk control rejected the request"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            client = FakeClient()
+            with (
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app, "FIT_DIR", root / "fits"),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
+            ):
+                with self.assertRaisesRegex(
+                    web_app.onelap.ApiRequestError, "risk control"
+                ):
+                    web_app.DashboardService().download_all_fits()
+
+        self.assertEqual(client.requested, ["one"])
+
     def test_local_jobs_skip_strava_setup(self) -> None:
         for mode in ("refresh", "download"):
             with self.subTest(mode=mode):
