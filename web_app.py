@@ -668,6 +668,7 @@ class DashboardService:
                     progress("正在连接顽鹿运动…", 8)
                 direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
                 records = direct.records(
+                    enrich_missing_metrics=False,
                     progress=(
                         lambda page, count, total: progress(
                             f"已读取第 {page} 页，共获取 {count} / {total} 条活动"
@@ -733,6 +734,7 @@ class DashboardService:
         if ONELAP_DIRECT_AUTH_PATH.is_file():
             direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
             records = direct.records(
+                enrich_missing_metrics=False,
                 progress=(
                     lambda _page, count, total: progress(
                         f"正在整理活动列表：{count} / {total} 条" if total else f"正在整理活动列表：{count} 条",

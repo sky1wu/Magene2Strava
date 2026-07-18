@@ -327,9 +327,48 @@ class WebAppTests(unittest.TestCase):
             self.assertFalse(cached["details_enriched"])
             self.assertFalse(cached["activities"][0]["details_enriched"])
 
+    def test_direct_refresh_lists_without_eager_metric_enrichment(self) -> None:
+        class FakeClient:
+            source = "account"
+
+            def __init__(self):
+                self.enrich_missing_metrics = None
+
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
+                return [{
+                    "id": "cached",
+                    "name": "缓存活动",
+                    "start_time": 200,
+                    "total_distance": 12000,
+                    "total_time": 1800,
+                }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            client = FakeClient()
+            service = web_app.DashboardService()
+            with (
+                patch.object(web_app, "CACHE_PATH", root / "dashboard.json"),
+                patch.object(web_app, "STATE_PATH", root / "state.json"),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
+                patch.object(service, "enrich_direct_records", return_value=True),
+                patch.object(service, "dashboard", return_value={}),
+            ):
+                service.refresh()
+
+        self.assertFalse(client.enrich_missing_metrics)
+
     def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
         class FakeClient:
-            def records(self, progress=None):
+            def __init__(self):
+                self.enrich_missing_metrics = None
+
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
                 if progress:
                     progress(1, 3, 3)
                 return [
@@ -351,10 +390,11 @@ class WebAppTests(unittest.TestCase):
             auth_path.write_text("{}", encoding="utf-8")
             fit_dir = root / "fits"
             lines = []
+            client = FakeClient()
             with (
                 patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
                 patch.object(web_app, "FIT_DIR", fit_dir),
-                patch.object(web_app.onelap, "OneLapOtmClient", return_value=FakeClient()),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
             ):
                 result = web_app.DashboardService().download_all_fits(
                     lambda line, progress: lines.append((line, progress))
@@ -365,13 +405,16 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(lines[-1][1], 100)
         self.assertIn("新增 1", lines[-1][0])
+        self.assertFalse(client.enrich_missing_metrics)
 
     def test_download_all_fits_stops_on_risk_control(self) -> None:
         class FakeClient:
             def __init__(self):
                 self.requested = []
+                self.enrich_missing_metrics = None
 
-            def records(self, progress=None):
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
                 return [
                     {"id": "one", "name": "活动一", "start_time": 1_720_000_001},
                     {"id": "two", "name": "活动二", "start_time": 1_720_000_002},
@@ -401,6 +444,7 @@ class WebAppTests(unittest.TestCase):
                     web_app.DashboardService().download_all_fits()
 
         self.assertEqual(client.requested, ["one"])
+        self.assertFalse(client.enrich_missing_metrics)
 
     def test_local_jobs_skip_strava_setup(self) -> None:
         for mode in ("refresh", "download"):
