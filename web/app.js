@@ -62,12 +62,20 @@ const els = {
   jobLog: document.querySelector("#jobLog"),
   jobDoneButton: document.querySelector("#jobDoneButton"),
   jobCloseButton: document.querySelector("#jobCloseButton"),
+  currentJob: document.querySelector("#currentJob"),
+  currentJobState: document.querySelector("#currentJobState"),
+  currentJobTitle: document.querySelector("#currentJobTitle"),
+  currentJobDetail: document.querySelector("#currentJobDetail"),
+  currentJobProgressBar: document.querySelector("#currentJobProgressBar"),
+  currentJobPercent: document.querySelector("#currentJobPercent"),
+  currentJobButton: document.querySelector("#currentJobButton"),
 };
 
 const app = {
   dashboard: null,
   visibleActivities: 10,
   activeJob: null,
+  currentJob: null,
   jobTimer: null,
 };
 
@@ -565,12 +573,14 @@ async function refreshData() {
   const original = els.refreshButton.lastChild.textContent;
   els.refreshButton.lastChild.textContent = "正在刷新";
   try {
-    const data = await request("/api/refresh", { method: "POST", body: "{}" });
-    renderDashboard(data);
-    showToast(`已刷新 ${data.activities.length.toLocaleString("zh-CN")} 条活动`);
+    app.activeJob = await request("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ mode: "refresh" }),
+    });
+    renderCurrentJob(app.activeJob);
+    pollJob();
   } catch (error) {
     showToast(error.message, "error");
-  } finally {
     els.refreshButton.disabled = false;
     els.refreshButton.lastChild.textContent = original;
   }
@@ -581,6 +591,60 @@ function openSyncDialog() {
   els.syncDialog.showModal();
 }
 
+function jobProgress(job) {
+  if (job.status !== "running") return 100;
+  if (Number.isFinite(job.progress)) return job.progress;
+  const progressLine = [...job.lines].reverse().find((line) => /\[\s*\d+\/\d+/.test(line));
+  const match = progressLine?.match(/\[\s*(\d+)\/(\d+)/);
+  return match ? Math.min(96, (Number(match[1]) / Number(match[2])) * 100) : Math.min(88, 10 + job.lines.length * 1.6);
+}
+
+function renderCurrentJob(job) {
+  app.currentJob = job;
+  els.currentJob.hidden = !job;
+  if (!job) return;
+  const progress = jobProgress(job);
+  const running = job.status === "running";
+  const success = job.status === "completed";
+  els.currentJob.classList.toggle("is-running", running);
+  els.currentJob.classList.toggle("is-success", success);
+  els.currentJob.classList.toggle("is-error", job.status === "failed");
+  els.currentJobState.innerHTML = `<i></i>${running ? "当前任务" : success ? "最近任务已完成" : "最近任务未完成"}`;
+  els.currentJobTitle.textContent = job.mode === "refresh" ? "刷新顽鹿活动" : job.mode === "preview" ? "检查同步计划" : "同步骑行数据";
+  els.currentJobDetail.textContent = job.lines.at(-1) || (running ? "正在启动…" : success ? "处理完成" : "任务执行失败");
+  els.currentJobProgressBar.style.width = `${progress}%`;
+  els.currentJobPercent.textContent = `${Math.round(progress)}%`;
+}
+
+function showJobDetails() {
+  const job = app.currentJob;
+  if (!job) return;
+  app.activeJob = job;
+  const running = job.status === "running";
+  const success = job.status === "completed";
+  els.jobEyebrow.textContent = running ? "同步进行中" : success ? "任务已完成" : "任务未完成";
+  els.jobDialogTitle.textContent = job.mode === "refresh" ? "刷新顽鹿活动" : job.mode === "preview" ? "同步计划检查" : "骑行数据处理";
+  els.jobLog.textContent = job.lines.length ? job.lines.join("\n") : "正在启动…";
+  els.jobProgressBar.style.width = `${jobProgress(job)}%`;
+  els.jobProgressBar.style.background = running ? "var(--accent)" : success ? "var(--success)" : "var(--danger)";
+  els.jobSpinner.className = `job-spinner${running ? "" : success ? " is-done" : " is-error"}`;
+  els.jobDoneButton.hidden = running;
+  els.jobDialog.showModal();
+}
+
+async function loadCurrentJob() {
+  try {
+    const { job } = await request("/api/jobs/current");
+    renderCurrentJob(job);
+    if (job?.status === "running") {
+      app.activeJob = job;
+      pollJob();
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
 async function startJob(mode) {
   const maxUploads = Math.max(1, Math.min(100, Number(els.uploadLimit.value) || 15));
   els.syncDialog.close();
@@ -588,6 +652,7 @@ async function startJob(mode) {
   els.jobDialogTitle.textContent = mode === "preview" ? "正在检查同步计划" : "正在处理骑行数据";
   els.jobSpinner.className = "job-spinner";
   els.jobProgressBar.style.width = "8%";
+  els.jobProgressBar.style.background = "var(--accent)";
   els.jobLog.textContent = "正在启动…";
   els.jobDoneButton.hidden = true;
   els.jobCloseButton.hidden = false;
@@ -597,6 +662,7 @@ async function startJob(mode) {
       method: "POST",
       body: JSON.stringify({ mode, max_uploads: maxUploads }),
     });
+    renderCurrentJob(app.activeJob);
     pollJob();
   } catch (error) {
     els.jobDialog.close();
@@ -612,10 +678,9 @@ async function pollJob() {
     app.activeJob = job;
     els.jobLog.textContent = job.lines.length ? job.lines.join("\n") : "正在连接数据源…";
     els.jobLog.scrollTop = els.jobLog.scrollHeight;
-    const progressLine = [...job.lines].reverse().find((line) => /\[\s*\d+\/\d+/.test(line));
-    const match = progressLine?.match(/\[\s*(\d+)\/(\d+)/);
-    const progress = match ? Math.min(96, (Number(match[1]) / Number(match[2])) * 100) : Math.min(88, 10 + job.lines.length * 1.6);
+    const progress = jobProgress(job);
     els.jobProgressBar.style.width = `${progress}%`;
+    renderCurrentJob(job);
     if (job.status === "running") {
       app.jobTimer = window.setTimeout(pollJob, 900);
       return;
@@ -628,8 +693,13 @@ async function pollJob() {
     els.jobDialogTitle.textContent = success ? "骑行数据处理完成" : "同步遇到问题";
     els.jobDoneButton.hidden = false;
     els.jobCloseButton.hidden = false;
+    if (job.mode === "refresh") {
+      els.refreshButton.disabled = false;
+      els.refreshButton.lastChild.textContent = "刷新数据";
+    }
     await loadDashboard();
-    showToast(success ? "同步任务已完成" : "同步任务失败，请查看日志", success ? "success" : "error");
+    const taskName = job.mode === "refresh" ? "数据刷新" : "同步任务";
+    showToast(success ? `${taskName}已完成` : `${taskName}失败，请查看日志`, success ? "success" : "error");
   } catch (error) {
     showToast(error.message, "error");
     app.jobTimer = window.setTimeout(pollJob, 1800);
@@ -667,6 +737,7 @@ function setup() {
   els.menuButton.addEventListener("click", () => toggleMenu());
   els.mobileOverlay.addEventListener("click", () => toggleMenu(false));
   els.jobDoneButton.addEventListener("click", () => { app.activeJob = null; window.clearTimeout(app.jobTimer); });
+  els.currentJobButton.addEventListener("click", showJobDetails);
   els.onelapAuthButton.addEventListener("click", loginOnelap);
   els.stravaCookieButton.addEventListener("click", importStravaCookie);
   els.stravaHarButton.addEventListener("click", importStravaHar);
@@ -677,6 +748,7 @@ function setup() {
   if (authResult.has("auth")) window.history.replaceState({}, "", window.location.pathname + window.location.hash);
   setupNavigation();
   loadDashboard();
+  loadCurrentJob();
 }
 
 setup();

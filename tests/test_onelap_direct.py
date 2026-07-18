@@ -127,7 +127,13 @@ class OneLapDirectTests(unittest.TestCase):
                 if request.full_url.endswith("/analysis/456"):
                     payload = {
                         "code": 200,
-                        "data": {"ridingRecord": {"totalDistance": 42000, "time": 5400}},
+                        "data": {
+                            "ridingRecord": {
+                                "id": 336072,
+                                "totalDistance": 42000,
+                                "time": 5400,
+                            }
+                        },
                     }
                 else:
                     payload = {
@@ -148,6 +154,65 @@ class OneLapDirectTests(unittest.TestCase):
 
         self.assertEqual(records[0]["total_distance"], 42000)
         self.assertEqual(records[0]["total_time"], 5400)
+        self.assertEqual(records[0]["id"], "456")
+
+    def test_otm_records_supports_current_list_metrics_and_pagination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "e" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            response = {
+                "code": 200,
+                "data": {
+                    "pagination": {"total": 1, "has_more": False},
+                    "list": [{
+                        "id": "activity-1",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "distance_km": 32.5,
+                        "time_seconds": 3600,
+                        "load_tss": 42.5,
+                    }],
+                },
+            }
+
+            with patch.object(onelap, "urlopen", return_value=FakeResponse(json.dumps(response).encode("utf-8"))) as opened:
+                records = onelap.OneLapOtmClient(auth_path, 10).records()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["total_distance"], 32500)
+        self.assertEqual(records[0]["total_time"], 3600)
+        self.assertEqual(records[0]["TSS"], 42.5)
+        self.assertEqual(opened.call_count, 1)
+
+    def test_otm_records_continues_after_server_capped_short_page(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "d" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            pages = []
+
+            def fake_open(request, timeout):
+                body = json.loads(request.data.decode("utf-8"))
+                pages.append(body["page"])
+                items = [
+                    {
+                        "id": body["page"],
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "distance": 1000,
+                        "time": 60,
+                    }
+                ] if body["page"] < 3 else []
+                return FakeResponse(json.dumps({"code": 200, "data": {"list": items}}).encode("utf-8"))
+
+            with patch.object(onelap, "urlopen", side_effect=fake_open):
+                records = onelap.OneLapOtmClient(auth_path, 10).records(page_size=50)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(pages, [1, 2, 3])
 
     def test_otm_client_refreshes_after_unauthorized_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -21,7 +21,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import fitdecode
@@ -77,8 +77,10 @@ def number(value: Any, default: float = 0.0) -> float:
 
 
 def integer(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
     try:
-        return int(value or 0)
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -544,15 +546,30 @@ class DashboardService:
             "latest_route": latest_fit_route(activities),
         }
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, progress: Callable[[str, int], None] | None = None) -> dict[str, Any]:
         if not self.refresh_lock.acquire(blocking=False):
             raise RuntimeError("数据刷新正在进行，请稍候")
         try:
             if ONELAP_DIRECT_AUTH_PATH.is_file():
+                if progress:
+                    progress("正在连接顽鹿运动…", 8)
                 direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
-                records = direct.records()
+                records = direct.records(
+                    progress=(
+                        lambda page, count, total: progress(
+                            f"已读取第 {page} 页，共获取 {count} / {total} 条活动"
+                            if total
+                            else f"已读取第 {page} 页，共获取 {count} 条活动",
+                            min(90, 10 + round((count / total) * 80)) if total else min(88, 10 + page * 4),
+                        )
+                        if progress
+                        else None
+                    )
+                )
                 auth_source = direct.source
             else:
+                if progress:
+                    progress("正在读取顽鹿活动…", 12)
                 login_har = str(ONELAP_HAR_PATH) if ONELAP_HAR_PATH.is_file() else None
                 headers, auth_source = onelap.obtain_auth(
                     DATA_ROOT / onelap.TOKEN_CACHE, login_har, login_har, 30.0
@@ -578,7 +595,11 @@ class DashboardService:
                 "auth_source": auth_source,
                 "activities": [clean_activity(item, states) for item in records],
             }
+            if progress:
+                progress(f"正在保存 {len(records)} 条活动…", 94)
             write_json(CACHE_PATH, payload)
+            if progress:
+                progress(f"刷新完成，共获取 {len(records)} 条活动", 100)
             return self.dashboard()
         finally:
             self.refresh_lock.release()
@@ -619,8 +640,36 @@ class JobManager:
                 "lines": [],
             }
             self.jobs[job_id] = job
-            threading.Thread(target=self._run, args=(job_id, command), daemon=True).start()
+            target = self._run_refresh if mode == "refresh" else self._run
+            args = (job_id,) if mode == "refresh" else (job_id, command)
+            threading.Thread(target=target, args=args, daemon=True).start()
             return dict(job)
+
+    def _update_progress(self, job_id: str, line: str, progress: int) -> None:
+        with self.lock:
+            job = self.jobs[job_id]
+            job["lines"].append(line)
+            job["lines"] = job["lines"][-500:]
+            job["progress"] = max(0, min(100, progress))
+
+    def _run_refresh(self, job_id: str) -> None:
+        try:
+            result = SERVICE.refresh(
+                lambda line, progress: self._update_progress(job_id, line, progress)
+            )
+            with self.lock:
+                job = self.jobs[job_id]
+                job["result"] = {"activities": result["summary"]["total_rides"]}
+                job["status"] = "completed"
+                job["exit_code"] = 0
+                job["finished_at"] = int(time.time())
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                job["status"] = "failed"
+                job["exit_code"] = -1
+                job["finished_at"] = int(time.time())
+                job["lines"].append(f"刷新失败：{exc}")
 
     def _run(self, job_id: str, command: list[str]) -> None:
         env = dict(os.environ)
@@ -659,6 +708,13 @@ class JobManager:
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
+            return json.loads(json.dumps(job)) if job else None
+
+    def current(self) -> dict[str, Any] | None:
+        with self.lock:
+            jobs = list(self.jobs.values())
+            running = next((job for job in reversed(jobs) if job["status"] == "running"), None)
+            job = running or (jobs[-1] if jobs else None)
             return json.loads(json.dumps(job)) if job else None
 
 
@@ -745,6 +801,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard":
             self.send_json(SERVICE.dashboard())
             return
+        if path == "/api/jobs/current":
+            self.send_json({"job": JOBS.current()})
+            return
         if path.startswith("/api/jobs/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])
             if job is None:
@@ -814,10 +873,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/jobs":
                 mode = str(body.get("mode") or "sync")
-                if mode not in {"sync", "preview"}:
+                if mode not in {"sync", "preview", "refresh"}:
                     raise ValueError("不支持的任务类型")
                 max_uploads = integer(body.get("max_uploads"), 15)
-                if not 1 <= max_uploads <= 100:
+                if mode != "refresh" and not 1 <= max_uploads <= 100:
                     raise ValueError("单次同步数量必须在 1 到 100 之间")
                 self.send_json(JOBS.start(mode, max_uploads), HTTPStatus.ACCEPTED)
                 return

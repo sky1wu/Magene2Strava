@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -262,21 +262,32 @@ def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
     )
     if not record_id or not started:
         return None
+    distance = _numeric(
+        record, "total_distance", "totalDistance", "distance", "distance_m"
+    )
+    if distance <= 0:
+        distance = _numeric(record, "distance_km") * 1000
     return {
         "id": record_id,
         "name": str(record.get("name") or record.get("title") or "骑行训练"),
         "start_time": started,
-        "total_distance": _numeric(
-            record, "total_distance", "totalDistance", "distance", "distance_m"
-        ),
+        "total_distance": distance,
         "total_time": int(
-            _numeric(record, "total_time", "totalTime", "time", "duration", "duration_s")
+            _numeric(
+                record,
+                "total_time",
+                "totalTime",
+                "time",
+                "duration",
+                "duration_s",
+                "time_seconds",
+            )
         ),
         "elevation": _numeric(
             record, "elevation", "total_ascent", "totalAscent", "ascent"
         ),
         "cal": _numeric(record, "cal", "calories", "kcal"),
-        "TSS": _numeric(record, "TSS", "tss"),
+        "TSS": _numeric(record, "TSS", "tss", "load_tss"),
         "source": "onelap-otm",
     }
 
@@ -488,7 +499,12 @@ class OneLapOtmClient:
             return riding_record
         return data
 
-    def records(self, page_size: int = 50, max_pages: int = 200) -> list[dict[str, Any]]:
+    def records(
+        self,
+        page_size: int = 50,
+        max_pages: int = 200,
+        progress: Callable[[int, int, int], None] | None = None,
+    ) -> list[dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
         expected = 0
         for page in range(1, max_pages + 1):
@@ -510,7 +526,11 @@ class OneLapOtmClient:
                 ):
                     try:
                         detail = self.record_detail(str(normalized["id"]))
-                        normalized = normalize_otm_record({**raw, **detail})
+                        # Detail data contains a device/user numeric `id` which is
+                        # not the activity ID used by the list and analysis APIs.
+                        # Keep the list record authoritative for identity.
+                        merged = {**detail, **raw, "id": normalized["id"]}
+                        normalized = normalize_otm_record(merged)
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
                             raise
@@ -521,7 +541,18 @@ class OneLapOtmClient:
                     expected = max(expected, int(data.get(key) or 0))
                 except (TypeError, ValueError):
                     pass
-            if not batch or len(batch) < page_size or (expected and len(records) >= expected):
+            pagination = data.get("pagination")
+            if isinstance(pagination, dict):
+                try:
+                    expected = max(expected, int(pagination.get("total") or 0))
+                except (TypeError, ValueError):
+                    pass
+            if progress:
+                progress(page, len(records), expected)
+            # OneLap may cap the response below the requested page size.  A short
+            # page therefore does not mean pagination is complete.
+            has_more = pagination.get("has_more") if isinstance(pagination, dict) else None
+            if not batch or has_more is False or (expected and len(records) >= expected):
                 break
         return list(records.values())
 

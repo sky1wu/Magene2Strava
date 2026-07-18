@@ -10,6 +10,15 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
+    def test_job_manager_current_prefers_running_job(self) -> None:
+        manager = web_app.JobManager()
+        manager.jobs = {
+            "done": {"id": "done", "status": "completed"},
+            "running": {"id": "running", "status": "running"},
+        }
+
+        self.assertEqual(manager.current()["id"], "running")
+
     def test_preferred_strava_mode_prioritizes_web_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -183,6 +192,7 @@ class WebAppTests(unittest.TestCase):
     def test_number_helpers_fail_closed(self) -> None:
         self.assertEqual(web_app.number("not-a-number"), 0)
         self.assertEqual(web_app.integer(None), 0)
+        self.assertEqual(web_app.integer(None, 15), 15)
 
     def test_project_route_preserves_shape_without_absolute_location(self) -> None:
         coordinates = [

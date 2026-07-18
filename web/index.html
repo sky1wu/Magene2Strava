@@ -64,6 +64,19 @@
       </header>
 
       <div class="content">
+        <section class="current-job" id="currentJob" aria-live="polite" hidden>
+          <div class="current-job-copy">
+            <span class="current-job-state" id="currentJobState"><i></i>当前任务</span>
+            <strong id="currentJobTitle">正在处理骑行数据</strong>
+            <span id="currentJobDetail">正在启动…</span>
+          </div>
+          <div class="current-job-progress" aria-label="任务进度">
+            <span><i id="currentJobProgressBar"></i></span>
+            <strong id="currentJobPercent">0%</strong>
+          </div>
+          <button class="button button-quiet" id="currentJobButton" type="button">查看详情</button>
+        </section>
+
         <section id="connections" class="connections-section section-enter" aria-labelledby="connectionsTitle">
           <div class="block-heading">
             <div><p class="eyebrow">数据链路</p><h2 id="connectionsTitle">连接状态</h2></div>
