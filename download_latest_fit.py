@@ -806,7 +806,12 @@ def obtain_auth(
 
     login_match = find_har_entry(har_paths(login_har_path or har_path), LOGIN_PATH)
     if not force_login and login_match:
-        captured = auth_from_login_capture(login_match[1])
+        try:
+            captured = auth_from_login_capture(login_match[1])
+        except DownloadError:
+            # Sanitized imported HARs intentionally retain only the login
+            # request. Replay that request below when the cached token expires.
+            captured = None
         if captured:
             token, uid, client_headers = captured
             save_cached_auth(cache_path, token, uid, client_headers)

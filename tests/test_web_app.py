@@ -41,9 +41,34 @@ class WebAppTests(unittest.TestCase):
             with (
                 patch.object(web_app, "STRAVA_WEB_SESSION_PATH", session_path),
                 patch.object(web_app, "STRAVA_CONFIG_PATH", config_path),
+                patch.object(web_app.sync, "StravaWebClient"),
             ):
                 self.assertEqual(web_app.preferred_strava_mode(), "web")
                 session_path.unlink()
+                self.assertEqual(web_app.preferred_strava_mode(), "api")
+
+    def test_preferred_strava_mode_falls_back_from_expired_web_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_path = root / "web.json"
+            config_path = root / "api.json"
+            session_path.write_text(
+                json.dumps({"cookies": [{"name": "session", "value": "expired"}]}),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps({"client_id": "1", "client_secret": "secret", "refresh_token": "refresh"}),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(web_app, "STRAVA_WEB_SESSION_PATH", session_path),
+                patch.object(web_app, "STRAVA_CONFIG_PATH", config_path),
+                patch.object(
+                    web_app.sync,
+                    "StravaWebClient",
+                    side_effect=web_app.sync.WebSessionExpiredError("expired"),
+                ),
+            ):
                 self.assertEqual(web_app.preferred_strava_mode(), "api")
 
     def test_onelap_har_import_retains_only_login_request(self) -> None:

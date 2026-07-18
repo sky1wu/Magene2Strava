@@ -28,6 +28,33 @@ class FakeResponse:
 
 
 class OneLapDirectTests(unittest.TestCase):
+    def test_sanitized_login_har_replays_request_after_cache_expiry(self) -> None:
+        login_entry = {
+            "request": {
+                "url": f"https://{onelap.API_HOST}{onelap.LOGIN_PATH}",
+                "headers": [],
+                "postData": {"text": '{"account":"encrypted","password":"hash"}'},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            har_path = root / "login.har"
+            cache_path = root / "token.json"
+            har_path.write_text(
+                json.dumps({"log": {"entries": [login_entry]}}), encoding="utf-8"
+            )
+            with (
+                patch.object(onelap, "har_paths", return_value=[har_path]),
+                patch.object(onelap, "perform_login", return_value=("token", "uid", {})) as login,
+            ):
+                headers, source = onelap.obtain_auth(
+                    cache_path, str(har_path), str(har_path), 10
+                )
+
+        self.assertEqual(source, "login")
+        self.assertEqual(headers["Authorization"], "token")
+        login.assert_called_once_with(login_entry, 10)
+
     def test_configure_direct_auth_hashes_password_and_saves_tokens(self) -> None:
         requests = []
 

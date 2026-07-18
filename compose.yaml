@@ -9,7 +9,7 @@ services:
     ports:
       - "8848:8848"
     volumes:
-      - ./magene2strava-data:/data
+      - magene2strava-data:/data
     environment:
       TZ: ${TZ:-Asia/Hong_Kong}
     read_only: true
@@ -19,3 +19,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+volumes:
+  magene2strava-data:

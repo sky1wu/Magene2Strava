@@ -306,11 +306,19 @@ def connection_status() -> list[dict[str, Any]]:
 
 
 def preferred_strava_mode() -> str:
+    config = read_json(STRAVA_CONFIG_PATH, {})
+    api_available = all(
+        config.get(field) for field in ("client_id", "client_secret", "refresh_token")
+    )
     session = read_json(STRAVA_WEB_SESSION_PATH, {})
     if isinstance(session.get("cookies"), list) and session["cookies"]:
-        return "web"
-    config = read_json(STRAVA_CONFIG_PATH, {})
-    if all(config.get(field) for field in ("client_id", "client_secret", "refresh_token")):
+        try:
+            sync.StravaWebClient(STRAVA_WEB_SESSION_PATH, 15.0)
+            return "web"
+        except sync.SyncError:
+            if not api_available:
+                return "web"
+    if api_available:
         return "api"
     return "web"
 

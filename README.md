@@ -38,7 +38,7 @@ docker run --rm --name magene2strava `
 
 ### Docker Compose
 
-项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并将数据保存在当前目录的 `magene2strava-data`：
+项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并使用 Docker 命名卷 `magene2strava-data` 保存数据，避免 Linux/NAS 上绑定目录的权限问题：
 
 ```powershell
 docker compose up -d
@@ -52,6 +52,8 @@ docker compose logs -f
 ```powershell
 docker compose down
 ```
+
+查看命名卷：`docker volume inspect magene2strava_magene2strava-data`。如需迁移授权或 FIT 文件，请在容器停止后通过临时容器复制卷内数据。
 
 如需修改宿主机端口，请修改 `compose.yaml` 中端口映射左侧的 `8848`：
 
@@ -73,7 +75,7 @@ ports:
 
 - 顽鹿运动：直接填写账号和密码。原始密码仅用于本次登录，落盘保存的是账号、MD5 登录摘要、token 和 refresh token；过期后会先刷新 token，必要时自动重新登录。
 - Strava：默认使用 Web 会话，可粘贴已登录浏览器请求中的 `Cookie` 请求头，或导入 Strava HAR。
-- Strava API OAuth：在 Strava 授权弹窗的高级选项中填写 Client ID 和 Client Secret；仅作为 Web 会话的备用模式。
+- Strava API OAuth：在 Strava 授权弹窗的高级选项中填写 Client ID 和 Client Secret；Web 会话失效时会自动回退到 API 模式。
 
 顽鹿登录摘要与 Strava Cookie 都属于可用凭据。不要把授权文件、HAR、Cookie 或整个数据目录分享给他人；通过 NAS 或远程服务器使用时，建议在反向代理中启用 HTTPS。
 
