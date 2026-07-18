@@ -10,6 +10,78 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
+    def test_download_all_fits_reauthenticates_legacy_har_mid_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fit_dir = root / "fits"
+            har_path = root / "onelap.har"
+            har_path.write_text("{}", encoding="utf-8")
+            records = [{"id": "ride", "name": "测试骑行", "start_time": 100}]
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "FIT_DIR", fit_dir),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", root / "missing.json"),
+                patch.object(web_app, "ONELAP_HAR_PATH", har_path),
+                patch.object(
+                    web_app.onelap,
+                    "obtain_auth",
+                    side_effect=[({"Authorization": "old"}, "cache"), ({"Authorization": "new"}, "login")],
+                ) as obtain_auth,
+                patch.object(web_app.sync, "onelap_records", return_value=records),
+                patch.object(
+                    web_app.onelap,
+                    "fit_link",
+                    side_effect=[
+                        web_app.onelap.AuthenticationError("expired"),
+                        ("https://fits.rfsvr.net/ride.fit", "ride.fit"),
+                    ],
+                ) as fit_link,
+                patch.object(web_app.onelap, "download_fit", return_value="downloaded"),
+            ):
+                result = web_app.DashboardService().download_all_fits()
+
+        self.assertEqual(result["downloaded"], 1)
+        self.assertEqual(fit_link.call_count, 2)
+        self.assertEqual(obtain_auth.call_count, 2)
+        self.assertTrue(obtain_auth.call_args_list[1].kwargs["force_login"])
+
+    def test_enrich_direct_records_reuses_cache_and_fetches_missing_details(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "id": 336072,
+                    "name": "详细骑行",
+                    "elevation": 88,
+                    "cal": 520,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [
+            {"id": "cached", "name": "骑行训练", "start_time": 100, "elevation": 0, "cal": 0, "TSS": 0},
+            {"id": "missing", "name": "骑行训练", "start_time": 200, "elevation": 0, "cal": 0, "TSS": 0},
+        ]
+        previous = {
+            "activities": [{"id": "cached", "name": "缓存骑行", "elevation_m": 42, "calories": 300, "tss": 18}],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["missing"])
+        self.assertEqual(records[0]["elevation"], 42)
+        self.assertEqual(records[0]["name"], "缓存骑行")
+        self.assertEqual(records[1]["id"], "missing")
+        self.assertEqual(records[1]["elevation"], 88)
+        self.assertEqual(records[1]["cal"], 520)
+
     def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
         class FakeClient:
             def records(self, progress=None):

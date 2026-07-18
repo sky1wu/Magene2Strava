@@ -554,10 +554,81 @@ class DashboardService:
             "latest_route": latest_fit_route(activities),
         }
 
+    def enrich_direct_records(
+        self,
+        direct: onelap.OneLapOtmClient,
+        records: list[dict[str, Any]],
+        previous_cache: dict[str, Any],
+        progress: Callable[[str, int], None] | None = None,
+    ) -> bool:
+        cached_items = previous_cache.get("activities", [])
+        cached_by_id = {
+            str(item.get("id")): item
+            for item in cached_items
+            if isinstance(item, dict) and item.get("id")
+        } if isinstance(cached_items, list) else {}
+        cache_complete = previous_cache.get("details_enriched") is True
+        failures = 0
+        total = len(records)
+        for index, record in enumerate(records, 1):
+            cached = cached_by_id.get(str(record.get("id")))
+            already_enriched = (
+                number(record.get("elevation")) > 0 or number(record.get("cal")) > 0
+            )
+            can_reuse = bool(
+                cached
+                and (
+                    cache_complete
+                    or number(cached.get("elevation_m")) > 0
+                    or number(cached.get("calories")) > 0
+                )
+            )
+            if already_enriched:
+                pass
+            elif can_reuse and cached:
+                record["elevation"] = number(cached.get("elevation_m"))
+                record["cal"] = number(cached.get("calories"))
+                if number(record.get("TSS")) <= 0:
+                    record["TSS"] = number(cached.get("tss"))
+                if record.get("name") in {None, "", "骑行训练"} and cached.get("name"):
+                    record["name"] = str(cached["name"])
+            else:
+                try:
+                    detail = direct.record_detail(str(record["id"]))
+                    enriched = onelap.normalize_otm_record(
+                        {
+                            **detail,
+                            "id": record["id"],
+                            "start_time": record.get("start_time"),
+                        }
+                    )
+                    if not enriched:
+                        raise onelap.ApiRequestError("OneLap activity detail is incomplete")
+                    for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
+                        if number(enriched.get(key)) > 0 or number(record.get(key)) <= 0:
+                            record[key] = enriched[key]
+                    if enriched.get("name"):
+                        record["name"] = enriched["name"]
+                except onelap.DownloadError as exc:
+                    failures += 1
+                    if "risk control" in str(exc).lower():
+                        failures += total - index
+                        if progress:
+                            progress(f"详情读取被顽鹿限流，将在下次刷新继续：{exc}", 90)
+                        break
+            if progress and (index % 25 == 0 or index == total):
+                progress(
+                    f"正在补全训练指标：{index} / {total} 条",
+                    25 + round(index / max(1, total) * 65),
+                )
+        return failures == 0
+
     def refresh(self, progress: Callable[[str, int], None] | None = None) -> dict[str, Any]:
         if not self.refresh_lock.acquire(blocking=False):
             raise RuntimeError("数据刷新正在进行，请稍候")
         try:
+            previous_cache = read_json(CACHE_PATH, {})
+            details_enriched = False
             if ONELAP_DIRECT_AUTH_PATH.is_file():
                 if progress:
                     progress("正在连接顽鹿运动…", 8)
@@ -568,13 +639,16 @@ class DashboardService:
                             f"已读取第 {page} 页，共获取 {count} / {total} 条活动"
                             if total
                             else f"已读取第 {page} 页，共获取 {count} 条活动",
-                            min(90, 10 + round((count / total) * 80)) if total else min(88, 10 + page * 4),
+                            min(25, 5 + round((count / total) * 20)) if total else min(24, 5 + page),
                         )
                         if progress
                         else None
                     )
                 )
                 auth_source = direct.source
+                details_enriched = self.enrich_direct_records(
+                    direct, records, previous_cache, progress
+                )
             else:
                 if progress:
                     progress("正在读取顽鹿活动…", 12)
@@ -593,6 +667,7 @@ class DashboardService:
                         force_login=True,
                     )
                     records = sync.onelap_records(headers, 30.0)
+                details_enriched = True
             state = read_json(STATE_PATH, {"version": 1, "records": {}})
             states = state.get("records", {})
             if not isinstance(states, dict):
@@ -601,6 +676,7 @@ class DashboardService:
                 "version": 1,
                 "fetched_at": int(time.time()),
                 "auth_source": auth_source,
+                "details_enriched": details_enriched,
                 "activities": [clean_activity(item, states) for item in records],
             }
             if progress:
@@ -617,6 +693,7 @@ class DashboardService:
     ) -> dict[str, int]:
         direct: onelap.OneLapOtmClient | None = None
         headers: dict[str, str] | None = None
+        login_har: str | None = None
         if progress:
             progress("正在读取顽鹿活动列表…", 3)
         if ONELAP_DIRECT_AUTH_PATH.is_file():
@@ -662,7 +739,21 @@ class DashboardService:
                     )
                 else:
                     assert headers is not None
-                    url, filename = onelap.fit_link(str(record["id"]), headers, 30.0)
+                    try:
+                        url, filename = onelap.fit_link(
+                            str(record["id"]), headers, 30.0
+                        )
+                    except onelap.AuthenticationError:
+                        headers, _ = onelap.obtain_auth(
+                            DATA_ROOT / onelap.TOKEN_CACHE,
+                            login_har,
+                            login_har,
+                            30.0,
+                            force_login=True,
+                        )
+                        url, filename = onelap.fit_link(
+                            str(record["id"]), headers, 30.0
+                        )
                     status = onelap.download_fit(
                         url, FIT_DIR / filename, 30.0, force=False
                     )
