@@ -244,6 +244,30 @@ class OneLapDirectTests(unittest.TestCase):
             self.assertEqual(status, "downloaded")
             self.assertEqual(target.read_bytes(), fit_content)
 
+    def test_download_record_fit_surfaces_risk_control_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            response = json.dumps(
+                {"code": -2, "msg": "操作过于频繁"}
+            ).encode("utf-8")
+
+            with patch.object(client, "_authorized", return_value=response):
+                with self.assertRaisesRegex(
+                    onelap.ApiRequestError, "risk control"
+                ):
+                    client.download_record_fit(
+                        "activity-id", target, fit_reference="cached.fit"
+                    )
+
+            self.assertFalse(target.exists())
+
     def test_otm_records_supports_current_list_metrics_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE

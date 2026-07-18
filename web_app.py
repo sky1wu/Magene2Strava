@@ -777,7 +777,8 @@ class DashboardService:
             except onelap.AuthenticationError:
                 raise
             except (onelap.DownloadError, OSError, KeyError) as exc:
-                if "risk control" in str(exc).lower():
+                normalized_error = str(exc).lower()
+                if "risk control" in normalized_error or "风控" in normalized_error:
                     raise
                 result["failed"] += 1
                 line = f"[{index}/{len(records)}] 失败 | {label} | {exc}"

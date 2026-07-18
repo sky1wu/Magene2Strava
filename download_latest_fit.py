@@ -619,6 +619,30 @@ class OneLapOtmClient:
                     raise
         if raw is None:
             raise last_error or ApiRequestError("OneLap FIT download failed")
+        if raw.lstrip().startswith(b"{"):
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                try:
+                    code = int(payload.get("code"))
+                except (TypeError, ValueError):
+                    code = -1
+                message = str(
+                    payload.get("msg")
+                    or payload.get("message")
+                    or payload.get("error")
+                    or "unknown"
+                )
+                normalized_message = message.lower()
+                if code == -2 or any(
+                    marker in normalized_message
+                    for marker in ("risk control", "risk_control", "风控")
+                ):
+                    raise ApiRequestError(
+                        f"OneLap risk control rejected the FIT request: {message}"
+                    )
         if len(raw) < 12 or raw[8:12] != b".FIT":
             raise ApiRequestError("OneLap FIT endpoint returned invalid content")
         target.parent.mkdir(parents=True, exist_ok=True)
