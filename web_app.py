@@ -624,19 +624,22 @@ class JobManager:
             if active:
                 raise RuntimeError("已有同步任务正在运行")
             job_id = uuid.uuid4().hex[:12]
-            command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
-            strava_mode = preferred_strava_mode()
-            command.extend(["--strava-mode", strava_mode])
-            if ONELAP_DIRECT_AUTH_PATH.is_file():
-                command.extend(["--onelap-auth", str(ONELAP_DIRECT_AUTH_PATH)])
-            elif ONELAP_HAR_PATH.is_file():
-                command.extend(
-                    ["--har", str(ONELAP_HAR_PATH), "--login-har", str(ONELAP_HAR_PATH)]
-                )
-            if mode == "preview":
-                command.append("--dry-run")
-            else:
-                command.extend(["--max-uploads", str(max_uploads), "--newest-first"])
+            command: list[str] = []
+            strava_mode = ""
+            if mode != "refresh":
+                command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
+                strava_mode = preferred_strava_mode()
+                command.extend(["--strava-mode", strava_mode])
+                if ONELAP_DIRECT_AUTH_PATH.is_file():
+                    command.extend(["--onelap-auth", str(ONELAP_DIRECT_AUTH_PATH)])
+                elif ONELAP_HAR_PATH.is_file():
+                    command.extend(
+                        ["--har", str(ONELAP_HAR_PATH), "--login-har", str(ONELAP_HAR_PATH)]
+                    )
+                if mode == "preview":
+                    command.append("--dry-run")
+                else:
+                    command.extend(["--max-uploads", str(max_uploads), "--newest-first"])
             job = {
                 "id": job_id,
                 "mode": mode,

@@ -10,6 +10,18 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
+    def test_refresh_job_skips_strava_setup(self) -> None:
+        manager = web_app.JobManager()
+        with (
+            patch.object(web_app, "preferred_strava_mode", side_effect=AssertionError("unused")),
+            patch.object(web_app.threading, "Thread") as thread,
+        ):
+            job = manager.start("refresh", 15)
+
+        self.assertEqual(job["mode"], "refresh")
+        self.assertEqual(job["strava_mode"], "")
+        thread.assert_called_once()
+
     def test_job_manager_current_prefers_running_job(self) -> None:
         manager = web_app.JobManager()
         manager.jobs = {

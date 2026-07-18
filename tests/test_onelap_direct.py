@@ -170,6 +170,8 @@ class OneLapDirectTests(unittest.TestCase):
                                 {
                                     "id": 456,
                                     "start_riding_time": "2026-07-18T06:30:00+08:00",
+                                    "totalDistance": 0,
+                                    "time": 0,
                                 }
                             ]
                         },

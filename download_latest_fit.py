@@ -528,9 +528,19 @@ class OneLapOtmClient:
                         detail = self.record_detail(str(normalized["id"]))
                         # Detail data contains a device/user numeric `id` which is
                         # not the activity ID used by the list and analysis APIs.
-                        # Keep the list record authoritative for identity.
-                        merged = {**detail, **raw, "id": normalized["id"]}
-                        normalized = normalize_otm_record(merged)
+                        # Keep the list record authoritative for identity while
+                        # allowing positive detail metrics to replace list zeros.
+                        detail_normalized = normalize_otm_record(
+                            {
+                                **detail,
+                                "id": normalized["id"],
+                                "start_time": normalized["start_time"],
+                            }
+                        )
+                        if detail_normalized:
+                            for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
+                                if detail_normalized[key] > 0:
+                                    normalized[key] = detail_normalized[key]
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
                             raise
