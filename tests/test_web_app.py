@@ -225,6 +225,8 @@ class WebAppTests(unittest.TestCase):
                 {
                     "id": "complete",
                     "name": "已补全",
+                    "distance_m": 32000,
+                    "duration_s": 3600,
                     "elevation_m": 42,
                     "calories": 300,
                     "tss": 18,
@@ -248,6 +250,8 @@ class WebAppTests(unittest.TestCase):
 
         self.assertTrue(complete)
         self.assertEqual(client.requested, ["pending"])
+        self.assertEqual(records[0]["total_distance"], 32000)
+        self.assertEqual(records[0]["total_time"], 3600)
         self.assertEqual(records[0]["elevation"], 42)
         self.assertTrue(records[0]["details_enriched"])
         self.assertTrue(records[1]["details_enriched"])

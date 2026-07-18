@@ -585,10 +585,17 @@ class DashboardService:
             if record_complete:
                 pass
             elif can_reuse and cached:
-                record["elevation"] = number(cached.get("elevation_m"))
-                record["cal"] = number(cached.get("calories"))
-                if number(record.get("TSS")) <= 0:
-                    record["TSS"] = number(cached.get("tss"))
+                cached_metrics = {
+                    "total_distance": "distance_m",
+                    "total_time": "duration_s",
+                    "elevation": "elevation_m",
+                    "cal": "calories",
+                    "TSS": "tss",
+                }
+                for record_key, cached_key in cached_metrics.items():
+                    cached_value = number(cached.get(cached_key))
+                    if cached_value > 0 and number(record.get(record_key)) <= 0:
+                        record[record_key] = cached_value
                 if record.get("name") in {None, "", "骑行训练"} and cached.get("name"):
                     record["name"] = str(cached["name"])
                 record["details_enriched"] = True
