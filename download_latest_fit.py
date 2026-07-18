@@ -569,8 +569,14 @@ class OneLapOtmClient:
     def download_record_fit(self, record_id: str, target: Path, force: bool = False) -> str:
         if target.exists() and not force:
             return "exists"
-        encoded_id = quote(record_id, safe="")
-        path = f"/api/otm/ride_record/analysis/fit_content/{encoded_id}"
+        detail = self.record_detail(record_id)
+        fit_reference = str(detail.get("fitUrl") or detail.get("fit_url") or "").strip()
+        if not fit_reference:
+            raise ApiRequestError("OneLap activity detail has no FIT reference")
+        encoded_reference = quote(
+            base64.b64encode(fit_reference.encode("utf-8")).decode("ascii"), safe=""
+        )
+        path = f"/api/otm/ride_record/analysis/fit_content/{encoded_reference}"
         raw: bytes | None = None
         last_error: ApiRequestError | None = None
         for base_url in (OTM_BASE_URL, OTM_FALLBACK_BASE_URL):

@@ -612,6 +612,78 @@ class DashboardService:
         finally:
             self.refresh_lock.release()
 
+    def download_all_fits(
+        self, progress: Callable[[str, int], None] | None = None
+    ) -> dict[str, int]:
+        direct: onelap.OneLapOtmClient | None = None
+        headers: dict[str, str] | None = None
+        if progress:
+            progress("正在读取顽鹿活动列表…", 3)
+        if ONELAP_DIRECT_AUTH_PATH.is_file():
+            direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
+            records = direct.records(
+                progress=(
+                    lambda _page, count, total: progress(
+                        f"正在整理活动列表：{count} / {total} 条" if total else f"正在整理活动列表：{count} 条",
+                        min(15, 3 + round((count / total) * 12)) if total else 8,
+                    )
+                    if progress
+                    else None
+                )
+            )
+        else:
+            login_har = str(ONELAP_HAR_PATH) if ONELAP_HAR_PATH.is_file() else None
+            headers, _ = onelap.obtain_auth(
+                DATA_ROOT / onelap.TOKEN_CACHE, login_har, login_har, 30.0
+            )
+            try:
+                records = sync.onelap_records(headers, 30.0)
+            except onelap.AuthenticationError:
+                headers, _ = onelap.obtain_auth(
+                    DATA_ROOT / onelap.TOKEN_CACHE,
+                    login_har,
+                    login_har,
+                    30.0,
+                    force_login=True,
+                )
+                records = sync.onelap_records(headers, 30.0)
+        if not records:
+            raise RuntimeError("顽鹿运动未返回活动记录")
+
+        FIT_DIR.mkdir(parents=True, exist_ok=True)
+        result = {"total": len(records), "downloaded": 0, "existing": 0, "failed": 0}
+        for index, record in enumerate(records, 1):
+            label = str(record.get("name") or record.get("id") or "未命名活动")
+            try:
+                if direct:
+                    filename = onelap.otm_fit_filename(record)
+                    status = direct.download_record_fit(
+                        str(record["id"]), FIT_DIR / filename, force=False
+                    )
+                else:
+                    assert headers is not None
+                    url, filename = onelap.fit_link(str(record["id"]), headers, 30.0)
+                    status = onelap.download_fit(
+                        url, FIT_DIR / filename, 30.0, force=False
+                    )
+                key = "existing" if status == "exists" else "downloaded"
+                result[key] += 1
+                line = f"[{index}/{len(records)}] {'已存在' if key == 'existing' else '已下载'} | {label}"
+            except onelap.AuthenticationError:
+                raise
+            except (onelap.DownloadError, OSError, KeyError) as exc:
+                result["failed"] += 1
+                line = f"[{index}/{len(records)}] 失败 | {label} | {exc}"
+            if progress:
+                progress(line, 15 + round(index / len(records) * 85))
+
+        if progress:
+            progress(
+                f"下载完成：新增 {result['downloaded']}，已存在 {result['existing']}，失败 {result['failed']}",
+                100,
+            )
+        return result
+
 
 class JobManager:
     def __init__(self) -> None:
@@ -622,11 +694,11 @@ class JobManager:
         with self.lock:
             active = next((job for job in self.jobs.values() if job["status"] == "running"), None)
             if active:
-                raise RuntimeError("已有同步任务正在运行")
+                raise RuntimeError("已有任务正在运行")
             job_id = uuid.uuid4().hex[:12]
             command: list[str] = []
             strava_mode = ""
-            if mode != "refresh":
+            if mode not in {"refresh", "download"}:
                 command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
                 strava_mode = preferred_strava_mode()
                 command.extend(["--strava-mode", strava_mode])
@@ -651,8 +723,14 @@ class JobManager:
                 "lines": [],
             }
             self.jobs[job_id] = job
-            target = self._run_refresh if mode == "refresh" else self._run
-            args = (job_id,) if mode == "refresh" else (job_id, command)
+            target = (
+                self._run_refresh
+                if mode == "refresh"
+                else self._run_download
+                if mode == "download"
+                else self._run
+            )
+            args = (job_id,) if mode in {"refresh", "download"} else (job_id, command)
             threading.Thread(target=target, args=args, daemon=True).start()
             return dict(job)
 
@@ -681,6 +759,25 @@ class JobManager:
                 job["exit_code"] = -1
                 job["finished_at"] = int(time.time())
                 job["lines"].append(f"刷新失败：{exc}")
+
+    def _run_download(self, job_id: str) -> None:
+        try:
+            result = SERVICE.download_all_fits(
+                lambda line, progress: self._update_progress(job_id, line, progress)
+            )
+            with self.lock:
+                job = self.jobs[job_id]
+                job["result"] = result
+                job["status"] = "completed"
+                job["exit_code"] = 0
+                job["finished_at"] = int(time.time())
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                job["status"] = "failed"
+                job["exit_code"] = -1
+                job["finished_at"] = int(time.time())
+                job["lines"].append(f"下载失败：{exc}")
 
     def _run(self, job_id: str, command: list[str]) -> None:
         env = dict(os.environ)
@@ -884,10 +981,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/jobs":
                 mode = str(body.get("mode") or "sync")
-                if mode not in {"sync", "preview", "refresh"}:
+                if mode not in {"sync", "preview", "refresh", "download"}:
                     raise ValueError("不支持的任务类型")
                 max_uploads = integer(body.get("max_uploads"), 15)
-                if mode != "refresh" and not 1 <= max_uploads <= 100:
+                if mode in {"sync", "preview"} and not 1 <= max_uploads <= 100:
                     raise ValueError("单次同步数量必须在 1 到 100 之间")
                 self.send_json(JOBS.start(mode, max_uploads), HTTPStatus.ACCEPTED)
                 return

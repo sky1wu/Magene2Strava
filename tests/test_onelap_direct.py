@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import base64
 import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from unittest.mock import patch
 
 import download_latest_fit as onelap
@@ -28,6 +30,34 @@ class FakeResponse:
 
 
 class OneLapDirectTests(unittest.TestCase):
+    def test_download_record_fit_uses_base64_detail_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            fit_reference = "MAGENE_C406_2026-07-03_194804_336072.fit"
+            fit_content = b"\x00" * 8 + b".FIT" + b"payload"
+            with (
+                patch.object(client, "record_detail", return_value={"fitUrl": fit_reference}),
+                patch.object(client, "_authorized", return_value=fit_content) as authorized,
+            ):
+                status = client.download_record_fit("activity-id", target)
+
+            encoded = quote(
+                base64.b64encode(fit_reference.encode("utf-8")).decode("ascii"), safe=""
+            )
+            self.assertEqual(status, "downloaded")
+            self.assertEqual(target.read_bytes(), fit_content)
+            self.assertEqual(
+                authorized.call_args.args[1],
+                f"{onelap.OTM_BASE_URL}/api/otm/ride_record/analysis/fit_content/{encoded}",
+            )
+
     def test_sanitized_login_har_replays_request_after_cache_expiry(self) -> None:
         login_entry = {
             "request": {

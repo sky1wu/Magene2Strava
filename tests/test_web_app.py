@@ -10,17 +10,58 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
-    def test_refresh_job_skips_strava_setup(self) -> None:
-        manager = web_app.JobManager()
-        with (
-            patch.object(web_app, "preferred_strava_mode", side_effect=AssertionError("unused")),
-            patch.object(web_app.threading, "Thread") as thread,
-        ):
-            job = manager.start("refresh", 15)
+    def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
+        class FakeClient:
+            def records(self, progress=None):
+                if progress:
+                    progress(1, 3, 3)
+                return [
+                    {"id": "one", "name": "活动一", "start_time": 1_720_000_001},
+                    {"id": "two", "name": "活动二", "start_time": 1_720_000_002},
+                    {"id": "three", "name": "活动三", "start_time": 1_720_000_003},
+                ]
 
-        self.assertEqual(job["mode"], "refresh")
-        self.assertEqual(job["strava_mode"], "")
-        thread.assert_called_once()
+            def download_record_fit(self, record_id, target, force=False):
+                if record_id == "three":
+                    raise web_app.onelap.DownloadError("network")
+                return "exists" if record_id == "two" else "downloaded"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            fit_dir = root / "fits"
+            lines = []
+            with (
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app, "FIT_DIR", fit_dir),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=FakeClient()),
+            ):
+                result = web_app.DashboardService().download_all_fits(
+                    lambda line, progress: lines.append((line, progress))
+                )
+
+        self.assertEqual(
+            result, {"total": 3, "downloaded": 1, "existing": 1, "failed": 1}
+        )
+        self.assertEqual(lines[-1][1], 100)
+        self.assertIn("新增 1", lines[-1][0])
+
+    def test_local_jobs_skip_strava_setup(self) -> None:
+        for mode in ("refresh", "download"):
+            with self.subTest(mode=mode):
+                manager = web_app.JobManager()
+                with (
+                    patch.object(
+                        web_app, "preferred_strava_mode", side_effect=AssertionError("unused")
+                    ),
+                    patch.object(web_app.threading, "Thread") as thread,
+                ):
+                    job = manager.start(mode, 15)
+
+                self.assertEqual(job["mode"], mode)
+                self.assertEqual(job["strava_mode"], "")
+                thread.assert_called_once()
 
     def test_job_manager_current_prefers_running_job(self) -> None:
         manager = web_app.JobManager()

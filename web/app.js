@@ -4,6 +4,7 @@ const els = {
   dateLabel: document.querySelector("#dateLabel"),
   freshness: document.querySelector("#freshness"),
   refreshButton: document.querySelector("#refreshButton"),
+  downloadButton: document.querySelector("#downloadButton"),
   syncButton: document.querySelector("#syncButton"),
   syncRate: document.querySelector("#syncRate"),
   distanceMetric: document.querySelector("#distanceMetric"),
@@ -586,6 +587,31 @@ async function refreshData() {
   }
 }
 
+async function downloadAllFits() {
+  els.downloadButton.disabled = true;
+  const original = els.downloadButton.lastChild.textContent;
+  els.downloadButton.lastChild.textContent = "正在下载";
+  try {
+    app.activeJob = await request("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ mode: "download" }),
+    });
+    renderCurrentJob(app.activeJob);
+    pollJob();
+  } catch (error) {
+    showToast(error.message, "error");
+    els.downloadButton.disabled = false;
+    els.downloadButton.lastChild.textContent = original;
+  }
+}
+
+function jobTitle(mode) {
+  if (mode === "download") return "下载全部 FIT";
+  if (mode === "refresh") return "刷新顽鹿活动";
+  if (mode === "preview") return "检查同步计划";
+  return "同步骑行数据";
+}
+
 function openSyncDialog() {
   if (!app.dashboard) return;
   els.syncDialog.showModal();
@@ -610,7 +636,7 @@ function renderCurrentJob(job) {
   els.currentJob.classList.toggle("is-success", success);
   els.currentJob.classList.toggle("is-error", job.status === "failed");
   els.currentJobState.innerHTML = `<i></i>${running ? "当前任务" : success ? "最近任务已完成" : "最近任务未完成"}`;
-  els.currentJobTitle.textContent = job.mode === "refresh" ? "刷新顽鹿活动" : job.mode === "preview" ? "检查同步计划" : "同步骑行数据";
+  els.currentJobTitle.textContent = jobTitle(job.mode);
   els.currentJobDetail.textContent = job.lines.at(-1) || (running ? "正在启动…" : success ? "处理完成" : "任务执行失败");
   els.currentJobProgressBar.style.width = `${progress}%`;
   els.currentJobPercent.textContent = `${Math.round(progress)}%`;
@@ -622,8 +648,8 @@ function showJobDetails() {
   app.activeJob = job;
   const running = job.status === "running";
   const success = job.status === "completed";
-  els.jobEyebrow.textContent = running ? "同步进行中" : success ? "任务已完成" : "任务未完成";
-  els.jobDialogTitle.textContent = job.mode === "refresh" ? "刷新顽鹿活动" : job.mode === "preview" ? "同步计划检查" : "骑行数据处理";
+  els.jobEyebrow.textContent = running ? (job.mode === "download" ? "下载进行中" : "任务进行中") : success ? "任务已完成" : "任务未完成";
+  els.jobDialogTitle.textContent = jobTitle(job.mode);
   els.jobLog.textContent = job.lines.length ? job.lines.join("\n") : "正在启动…";
   els.jobProgressBar.style.width = `${jobProgress(job)}%`;
   els.jobProgressBar.style.background = running ? "var(--accent)" : success ? "var(--success)" : "var(--danger)";
@@ -697,9 +723,17 @@ async function pollJob() {
       els.refreshButton.disabled = false;
       els.refreshButton.lastChild.textContent = "刷新数据";
     }
+    if (job.mode === "download") {
+      els.downloadButton.disabled = false;
+      els.downloadButton.lastChild.textContent = "下载全部 FIT";
+    }
     await loadDashboard();
-    const taskName = job.mode === "refresh" ? "数据刷新" : "同步任务";
-    showToast(success ? `${taskName}已完成` : `${taskName}失败，请查看日志`, success ? "success" : "error");
+    const taskName = job.mode === "download" ? "FIT 下载" : job.mode === "refresh" ? "数据刷新" : "同步任务";
+    const partialFailures = job.mode === "download" && success ? Number(job.result?.failed || 0) : 0;
+    const message = partialFailures
+      ? `${taskName}完成，${partialFailures} 条失败`
+      : success ? `${taskName}已完成` : `${taskName}失败，请查看日志`;
+    showToast(message, success && !partialFailures ? "success" : "error");
   } catch (error) {
     showToast(error.message, "error");
     app.jobTimer = window.setTimeout(pollJob, 1800);
@@ -728,6 +762,7 @@ function setupNavigation() {
 function setup() {
   els.dateLabel.textContent = new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "long" }).format(new Date());
   els.refreshButton.addEventListener("click", refreshData);
+  els.downloadButton.addEventListener("click", downloadAllFits);
   els.syncButton.addEventListener("click", openSyncDialog);
   els.previewButton.addEventListener("click", () => startJob("preview"));
   els.confirmSyncButton.addEventListener("click", () => startJob("sync"));

@@ -1765,6 +1765,17 @@ dialog h2 {
     display: none;
   }
 
+  .topbar .top-download {
+    display: inline-flex;
+    width: 38px;
+    min-height: 38px;
+    padding: 0;
+  }
+
+  .top-download span {
+    display: none;
+  }
+
   .topbar h1 {
     margin: 0;
     font-size: 17px;
