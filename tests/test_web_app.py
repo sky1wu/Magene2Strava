@@ -130,6 +130,51 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(records[0]["TSS"], 35)
         self.assertEqual(records[0]["name"], "列表活动名")
 
+    def test_enrich_direct_records_refetches_legacy_har_cache(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "elevation": 88,
+                    "cal": 520,
+                    "TSS": 35,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [{
+            "id": "legacy",
+            "name": "列表活动名",
+            "start_time": 200,
+            "elevation": 0,
+            "cal": 0,
+            "TSS": 0,
+        }]
+        previous = {
+            "auth_source": "cache",
+            "activities": [{
+                "id": "legacy",
+                "name": "旧 HAR 缓存",
+                "elevation_m": 0,
+                "calories": 0,
+                "tss": 0,
+            }],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["legacy"])
+        self.assertEqual(records[0]["elevation"], 88)
+        self.assertEqual(records[0]["cal"], 520)
+        self.assertEqual(records[0]["TSS"], 35)
+
     def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
         class FakeClient:
             def records(self, progress=None):

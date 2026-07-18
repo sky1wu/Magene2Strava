@@ -568,10 +568,7 @@ class DashboardService:
             for item in cached_items
             if isinstance(item, dict) and item.get("id")
         } if isinstance(cached_items, list) else {}
-        cache_complete = (
-            previous_cache.get("details_enriched") is True
-            or previous_cache.get("auth_source") not in {None, "account"}
-        )
+        cache_complete = previous_cache.get("details_enriched") is True
         failures = 0
         total = len(records)
         for index, record in enumerate(records, 1):
