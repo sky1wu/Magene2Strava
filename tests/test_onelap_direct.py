@@ -245,6 +245,22 @@ class OneLapDirectTests(unittest.TestCase):
         self.assertEqual(records[0]["TSS"], 42.5)
         self.assertEqual(opened.call_count, 1)
 
+    def test_otm_records_ignore_zero_metric_placeholders(self) -> None:
+        record = onelap.normalize_otm_record(
+            {
+                "id": "activity-1",
+                "start_riding_time": "2026-07-18T06:30:00+08:00",
+                "totalDistance": 0,
+                "distance_km": 32.5,
+                "time": 0,
+                "time_seconds": 3600,
+            }
+        )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record["total_distance"], 32500)
+        self.assertEqual(record["total_time"], 3600)
+
     def test_otm_records_continues_after_server_capped_short_page(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE

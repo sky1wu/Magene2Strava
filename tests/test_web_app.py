@@ -192,6 +192,24 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(manager.current()["id"], "running")
 
+    def test_download_job_is_failed_when_every_file_fails(self) -> None:
+        manager = web_app.JobManager()
+        manager.jobs = {
+            "download": {
+                "id": "download",
+                "status": "running",
+                "lines": [],
+            }
+        }
+        result = {"total": 2, "downloaded": 0, "existing": 0, "failed": 2}
+
+        with patch.object(web_app.SERVICE, "download_all_fits", return_value=result):
+            manager._run_download("download")
+
+        self.assertEqual(manager.jobs["download"]["result"], result)
+        self.assertEqual(manager.jobs["download"]["status"], "failed")
+        self.assertEqual(manager.jobs["download"]["exit_code"], 1)
+
     def test_preferred_strava_mode_prioritizes_web_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -254,9 +272,17 @@ class WebAppTests(unittest.TestCase):
                 "headers": [{"name": "Content-Type", "value": "application/json"}],
                 "postData": {"text": '{"account":"encrypted","password":"hash"}'},
             }
+            obsolete_login_request = {
+                **login_request,
+                "postData": {"text": '{"account":"old","password":"wrong"}'},
+            }
             har = {
                 "log": {
                     "entries": [
+                        {
+                            "startedDateTime": "2026-07-17T00:00:00Z",
+                            "request": obsolete_login_request,
+                        },
                         {
                             "startedDateTime": "2026-07-18T00:00:00Z",
                             "request": login_request,

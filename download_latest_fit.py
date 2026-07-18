@@ -253,6 +253,20 @@ def _numeric(record: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _positive_numeric(record: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = record.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return 0.0
+
+
 def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
     record_id = str(record.get("id") or record.get("activity_id") or "").strip()
     started = _epoch(
@@ -262,18 +276,18 @@ def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
     )
     if not record_id or not started:
         return None
-    distance = _numeric(
+    distance = _positive_numeric(
         record, "total_distance", "totalDistance", "distance", "distance_m"
     )
     if distance <= 0:
-        distance = _numeric(record, "distance_km") * 1000
+        distance = _positive_numeric(record, "distance_km") * 1000
     return {
         "id": record_id,
         "name": str(record.get("name") or record.get("title") or "骑行训练"),
         "start_time": started,
         "total_distance": distance,
         "total_time": int(
-            _numeric(
+            _positive_numeric(
                 record,
                 "total_time",
                 "totalTime",

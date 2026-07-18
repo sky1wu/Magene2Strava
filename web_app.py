@@ -332,7 +332,7 @@ class AuthService:
         entries = har.get("log", {}).get("entries", [])
         if not isinstance(entries, list) or not entries:
             raise ValueError("HAR 中没有可用的网络请求")
-        login_entry = next(
+        login_entry = max(
             (
                 entry
                 for entry in entries
@@ -340,7 +340,8 @@ class AuthService:
                 and urlparse(str(entry.get("request", {}).get("url", ""))).path
                 == onelap.LOGIN_PATH
             ),
-            None,
+            key=lambda entry: str(entry.get("startedDateTime", "")),
+            default=None,
         )
         if not login_entry:
             raise ValueError("HAR 未包含顽鹿登录请求，请从登录前开始录制")
@@ -851,8 +852,12 @@ class JobManager:
             with self.lock:
                 job = self.jobs[job_id]
                 job["result"] = result
-                job["status"] = "completed"
-                job["exit_code"] = 0
+                all_failed = (
+                    result.get("failed", 0) > 0
+                    and result.get("downloaded", 0) + result.get("existing", 0) == 0
+                )
+                job["status"] = "failed" if all_failed else "completed"
+                job["exit_code"] = 1 if all_failed else 0
                 job["finished_at"] = int(time.time())
         except Exception as exc:
             with self.lock:
