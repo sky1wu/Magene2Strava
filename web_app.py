@@ -333,32 +333,48 @@ class AuthService:
         entries = har.get("log", {}).get("entries", [])
         if not isinstance(entries, list) or not entries:
             raise ValueError("HAR 中没有可用的网络请求")
-        login_entry = max(
-            (
-                entry
-                for entry in entries
-                if isinstance(entry, dict)
-                and urlparse(str(entry.get("request", {}).get("url", ""))).path
-                == onelap.LOGIN_PATH
-            ),
-            key=lambda entry: str(entry.get("startedDateTime", "")),
-            default=None,
-        )
-        if not login_entry:
+        login_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            request = entry.get("request")
+            if not isinstance(request, dict):
+                continue
+            if urlparse(str(request.get("url", ""))).path == onelap.LOGIN_PATH:
+                login_entries.append(entry)
+        if not login_entries:
             raise ValueError("HAR 未包含顽鹿登录请求，请从登录前开始录制")
+        login_entries.sort(
+            key=lambda entry: str(entry.get("startedDateTime", "")), reverse=True
+        )
 
         suffix = uuid.uuid4().hex
         temporary_har = DATA_ROOT / f".onelap_auth.{suffix}.har"
         temporary_cache = DATA_ROOT / f".onelap_token.{suffix}.json"
         try:
-            sync.save_json(temporary_har, har)
-            headers, source = onelap.obtain_auth(
-                temporary_cache,
-                str(temporary_har),
-                str(temporary_har),
-                30.0,
-            )
-            onelap.newest_record(headers, 30.0)
+            login_entry = None
+            last_error: Exception | None = None
+            for candidate in login_entries:
+                try:
+                    token, uid, client_headers = onelap.perform_login(candidate, 30.0)
+                    headers = onelap.authenticated_headers(token, uid, client_headers)
+                    onelap.newest_record(headers, 30.0)
+                except (
+                    onelap.DownloadError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                ) as exc:
+                    last_error = exc
+                    continue
+                login_entry = candidate
+                onelap.save_cached_auth(temporary_cache, token, uid, client_headers)
+                break
+            if login_entry is None:
+                raise ValueError(
+                    "HAR 中没有可重放的顽鹿登录请求，请重新录制登录过程"
+                ) from last_error
+
             retained = {
                 "log": {
                     "version": "1.2",
@@ -379,7 +395,7 @@ class AuthService:
                     os.chmod(path, 0o600)
                 except OSError:
                     pass
-            return source
+            return "login"
         finally:
             temporary_har.unlink(missing_ok=True)
             temporary_cache.unlink(missing_ok=True)

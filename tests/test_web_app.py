@@ -480,26 +480,26 @@ class WebAppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             retained_path = root / "onelap_auth.har"
-            login_request = {
+            working_login_request = {
                 "url": f"https://{web_app.onelap.API_HOST}{web_app.onelap.LOGIN_PATH}",
                 "method": "POST",
                 "headers": [{"name": "Content-Type", "value": "application/json"}],
                 "postData": {"text": '{"account":"encrypted","password":"hash"}'},
             }
-            obsolete_login_request = {
-                **login_request,
-                "postData": {"text": '{"account":"old","password":"wrong"}'},
+            failed_login_request = {
+                **working_login_request,
+                "postData": {"text": '{"account":"new","password":"wrong"}'},
             }
             har = {
                 "log": {
                     "entries": [
                         {
                             "startedDateTime": "2026-07-17T00:00:00Z",
-                            "request": obsolete_login_request,
+                            "request": working_login_request,
                         },
                         {
                             "startedDateTime": "2026-07-18T00:00:00Z",
-                            "request": login_request,
+                            "request": failed_login_request,
                             "response": {"content": {"text": "sensitive response"}},
                         },
                         {"request": {"url": "https://example.com/private"}},
@@ -507,17 +507,15 @@ class WebAppTests(unittest.TestCase):
                 }
             }
 
-            def fake_auth(cache_path, *_args, **_kwargs):
-                web_app.sync.save_json(
-                    cache_path,
-                    {"token": "token", "uid": "uid", "expires_at": 9_999_999_999},
-                )
-                return {"Authorization": "token"}, "login"
+            def fake_login(entry, _timeout):
+                if entry["request"] == failed_login_request:
+                    raise web_app.onelap.AuthenticationError("invalid login")
+                return "token", "uid", {"User-Agent": "test"}
 
             with (
                 patch.object(web_app, "DATA_ROOT", root),
                 patch.object(web_app, "ONELAP_HAR_PATH", retained_path),
-                patch.object(web_app.onelap, "obtain_auth", side_effect=fake_auth),
+                patch.object(web_app.onelap, "perform_login", side_effect=fake_login) as login,
                 patch.object(web_app.onelap, "newest_record", return_value={"id": "ride"}),
             ):
                 source = web_app.AuthService().import_onelap_har(har)
@@ -526,8 +524,25 @@ class WebAppTests(unittest.TestCase):
             entries = retained["log"]["entries"]
             self.assertEqual(source, "login")
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["request"], login_request)
+            self.assertEqual(entries[0]["request"], working_login_request)
             self.assertNotIn("response", entries[0])
+            self.assertEqual(login.call_count, 2)
+
+    def test_onelap_har_import_rejects_unreplayable_login_requests(self) -> None:
+        login_request = {
+            "url": f"https://{web_app.onelap.API_HOST}{web_app.onelap.LOGIN_PATH}",
+            "method": "POST",
+            "postData": {"text": '{"account":"encrypted","password":"wrong"}'},
+        }
+        har = {"log": {"entries": [{"request": login_request}]}}
+
+        with patch.object(
+            web_app.onelap,
+            "perform_login",
+            side_effect=web_app.onelap.AuthenticationError("invalid login"),
+        ):
+            with self.assertRaisesRegex(ValueError, "可重放"):
+                web_app.AuthService().import_onelap_har(har)
 
     def test_onelap_har_import_requires_login_request(self) -> None:
         har = {"log": {"entries": [{"request": {"url": "https://example.com"}}]}}
