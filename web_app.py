@@ -567,19 +567,15 @@ class DashboardService:
             for item in cached_items
             if isinstance(item, dict) and item.get("id")
         } if isinstance(cached_items, list) else {}
-        cache_complete = previous_cache.get("details_enriched") is True
+        cache_complete = (
+            previous_cache.get("details_enriched") is True
+            or previous_cache.get("auth_source") not in {None, "account"}
+        )
         failures = 0
         total = len(records)
         for index, record in enumerate(records, 1):
             cached = cached_by_id.get(str(record.get("id")))
-            can_reuse = bool(
-                cached
-                and (
-                    cache_complete
-                    or number(cached.get("elevation_m")) > 0
-                    or number(cached.get("calories")) > 0
-                )
-            )
+            can_reuse = bool(cached and cache_complete)
             if can_reuse and cached:
                 record["elevation"] = number(cached.get("elevation_m"))
                 record["cal"] = number(cached.get("calories"))
@@ -602,8 +598,9 @@ class DashboardService:
                     for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
                         if number(enriched.get(key)) > 0 or number(record.get(key)) <= 0:
                             record[key] = enriched[key]
-                    if enriched.get("name"):
-                        record["name"] = enriched["name"]
+                    detail_name = str(detail.get("name") or detail.get("title") or "").strip()
+                    if detail_name:
+                        record["name"] = detail_name
                 except onelap.DownloadError as exc:
                     failures += 1
                     if "risk control" in str(exc).lower():

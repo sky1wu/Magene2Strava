@@ -66,6 +66,7 @@ class WebAppTests(unittest.TestCase):
             {"id": "missing", "name": "骑行训练", "start_time": 200, "elevation": 0, "cal": 100, "TSS": 0},
         ]
         previous = {
+            "details_enriched": True,
             "activities": [{"id": "cached", "name": "缓存骑行", "elevation_m": 42, "calories": 300, "tss": 18}],
         }
         client = FakeClient()
@@ -81,6 +82,53 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(records[1]["id"], "missing")
         self.assertEqual(records[1]["elevation"], 88)
         self.assertEqual(records[1]["cal"], 520)
+
+    def test_enrich_direct_records_refetches_partial_account_cache(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "elevation": 88,
+                    "cal": 520,
+                    "TSS": 35,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [{
+            "id": "partial",
+            "name": "列表活动名",
+            "start_time": 200,
+            "elevation": 0,
+            "cal": 100,
+            "TSS": 12,
+        }]
+        previous = {
+            "auth_source": "account",
+            "details_enriched": False,
+            "activities": [{
+                "id": "partial",
+                "name": "旧缓存名",
+                "elevation_m": 42,
+                "calories": 0,
+                "tss": 0,
+            }],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["partial"])
+        self.assertEqual(records[0]["elevation"], 88)
+        self.assertEqual(records[0]["cal"], 520)
+        self.assertEqual(records[0]["TSS"], 35)
+        self.assertEqual(records[0]["name"], "列表活动名")
 
     def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
         class FakeClient:

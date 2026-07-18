@@ -1772,6 +1772,10 @@ dialog h2 {
     padding: 0;
   }
 
+  .current-job .current-job-button {
+    display: inline-flex;
+  }
+
   .top-download span {
     display: none;
   }

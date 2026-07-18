@@ -5,6 +5,7 @@ const els = {
   freshness: document.querySelector("#freshness"),
   refreshButton: document.querySelector("#refreshButton"),
   downloadButton: document.querySelector("#downloadButton"),
+  downloadButtonLabel: document.querySelector("#downloadButtonLabel"),
   syncButton: document.querySelector("#syncButton"),
   syncRate: document.querySelector("#syncRate"),
   distanceMetric: document.querySelector("#distanceMetric"),
@@ -589,8 +590,8 @@ async function refreshData() {
 
 async function downloadAllFits() {
   els.downloadButton.disabled = true;
-  const original = els.downloadButton.lastChild.textContent;
-  els.downloadButton.lastChild.textContent = "正在下载";
+  const original = els.downloadButtonLabel.textContent;
+  els.downloadButtonLabel.textContent = "正在下载";
   try {
     app.activeJob = await request("/api/jobs", {
       method: "POST",
@@ -601,7 +602,7 @@ async function downloadAllFits() {
   } catch (error) {
     showToast(error.message, "error");
     els.downloadButton.disabled = false;
-    els.downloadButton.lastChild.textContent = original;
+    els.downloadButtonLabel.textContent = original;
   }
 }
 
@@ -725,7 +726,7 @@ async function pollJob() {
     }
     if (job.mode === "download") {
       els.downloadButton.disabled = false;
-      els.downloadButton.lastChild.textContent = "下载全部 FIT";
+      els.downloadButtonLabel.textContent = "下载全部 FIT";
     }
     await loadDashboard();
     const taskName = job.mode === "download" ? "FIT 下载" : job.mode === "refresh" ? "数据刷新" : "同步任务";
