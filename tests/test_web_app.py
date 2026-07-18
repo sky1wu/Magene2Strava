@@ -497,6 +497,43 @@ class WebAppTests(unittest.TestCase):
             ):
                 self.assertEqual(web_app.preferred_strava_mode(), "api")
 
+    def test_onelap_login_validation_skips_metric_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "onelap_auth.json"
+            calls = []
+
+            class FakeClient:
+                source = "account"
+
+                def records(self, **kwargs):
+                    calls.append(kwargs)
+                    return [{"id": "ride"}]
+
+            def fake_configure(path, *_args):
+                path.write_text("{}", encoding="utf-8")
+                return FakeClient()
+
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(
+                    web_app.onelap,
+                    "configure_direct_auth",
+                    side_effect=fake_configure,
+                ),
+            ):
+                source = web_app.AuthService().login_onelap("rider", "secret")
+            auth_saved = auth_path.is_file()
+
+        self.assertEqual(source, "account")
+        self.assertEqual(calls, [{
+            "page_size": 1,
+            "max_pages": 1,
+            "enrich_missing_metrics": False,
+        }])
+        self.assertTrue(auth_saved)
+
     def test_onelap_har_import_retains_only_login_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

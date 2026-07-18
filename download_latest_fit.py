@@ -518,6 +518,7 @@ class OneLapOtmClient:
         page_size: int = 50,
         max_pages: int = 200,
         progress: Callable[[int, int, int], None] | None = None,
+        enrich_missing_metrics: bool = True,
     ) -> list[dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
         expected = 0
@@ -535,7 +536,7 @@ class OneLapOtmClient:
                 if not isinstance(raw, dict):
                     continue
                 normalized = normalize_otm_record(raw)
-                if normalized and (
+                if enrich_missing_metrics and normalized and (
                     normalized["total_distance"] <= 0 or normalized["total_time"] <= 0
                 ):
                     missing_distance = normalized["total_distance"] <= 0

@@ -252,6 +252,39 @@ class OneLapDirectTests(unittest.TestCase):
         self.assertEqual(records[0]["total_time"], 0)
         self.assertFalse(records[0].get("details_enriched", False))
 
+    def test_otm_records_can_skip_missing_metric_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "c" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            list_response = {
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": "validation",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "totalDistance": 0,
+                        "time": 0,
+                    }]
+                },
+            }
+
+            with (
+                patch.object(client, "_authorized_json", return_value=list_response),
+                patch.object(
+                    client,
+                    "record_detail",
+                    side_effect=AssertionError("auth validation must not fetch details"),
+                ),
+            ):
+                records = client.records(max_pages=1, enrich_missing_metrics=False)
+
+        self.assertEqual(records[0]["id"], "validation")
+        self.assertEqual(records[0]["total_distance"], 0)
+
     def test_download_record_fit_reuses_preserved_detail_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

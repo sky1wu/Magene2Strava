@@ -404,7 +404,7 @@ class AuthService:
         temporary = DATA_ROOT / f".onelap_auth.{uuid.uuid4().hex}.json"
         try:
             client = onelap.configure_direct_auth(temporary, account, password, 30.0)
-            client.records(page_size=1, max_pages=1)
+            client.records(page_size=1, max_pages=1, enrich_missing_metrics=False)
             os.replace(temporary, ONELAP_DIRECT_AUTH_PATH)
             try:
                 os.chmod(ONELAP_DIRECT_AUTH_PATH, 0o600)
