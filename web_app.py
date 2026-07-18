@@ -21,7 +21,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import fitdecode
@@ -77,8 +77,10 @@ def number(value: Any, default: float = 0.0) -> float:
 
 
 def integer(value: Any, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
     try:
-        return int(value or 0)
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -96,6 +98,7 @@ def clean_activity(record: dict[str, Any], states: dict[str, Any]) -> dict[str, 
         "elevation_m": round(number(record.get("elevation")), 1),
         "calories": round(number(record.get("cal")), 0),
         "tss": round(number(record.get("TSS")), 1),
+        "details_enriched": record.get("details_enriched") is True,
         "status": status,
         "activity_id": str(state.get("activity_id") or ""),
         "error": str(state.get("error") or ""),
@@ -304,11 +307,19 @@ def connection_status() -> list[dict[str, Any]]:
 
 
 def preferred_strava_mode() -> str:
+    config = read_json(STRAVA_CONFIG_PATH, {})
+    api_available = all(
+        config.get(field) for field in ("client_id", "client_secret", "refresh_token")
+    )
     session = read_json(STRAVA_WEB_SESSION_PATH, {})
     if isinstance(session.get("cookies"), list) and session["cookies"]:
-        return "web"
-    config = read_json(STRAVA_CONFIG_PATH, {})
-    if all(config.get(field) for field in ("client_id", "client_secret", "refresh_token")):
+        try:
+            sync.StravaWebClient(STRAVA_WEB_SESSION_PATH, 15.0)
+            return "web"
+        except sync.SyncError:
+            if not api_available:
+                return "web"
+    if api_available:
         return "api"
     return "web"
 
@@ -322,31 +333,48 @@ class AuthService:
         entries = har.get("log", {}).get("entries", [])
         if not isinstance(entries, list) or not entries:
             raise ValueError("HAR 中没有可用的网络请求")
-        login_entry = next(
-            (
-                entry
-                for entry in entries
-                if isinstance(entry, dict)
-                and urlparse(str(entry.get("request", {}).get("url", ""))).path
-                == onelap.LOGIN_PATH
-            ),
-            None,
-        )
-        if not login_entry:
+        login_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            request = entry.get("request")
+            if not isinstance(request, dict):
+                continue
+            if urlparse(str(request.get("url", ""))).path == onelap.LOGIN_PATH:
+                login_entries.append(entry)
+        if not login_entries:
             raise ValueError("HAR 未包含顽鹿登录请求，请从登录前开始录制")
+        login_entries.sort(
+            key=lambda entry: str(entry.get("startedDateTime", "")), reverse=True
+        )
 
         suffix = uuid.uuid4().hex
         temporary_har = DATA_ROOT / f".onelap_auth.{suffix}.har"
         temporary_cache = DATA_ROOT / f".onelap_token.{suffix}.json"
         try:
-            sync.save_json(temporary_har, har)
-            headers, source = onelap.obtain_auth(
-                temporary_cache,
-                str(temporary_har),
-                str(temporary_har),
-                30.0,
-            )
-            onelap.newest_record(headers, 30.0)
+            login_entry = None
+            last_error: Exception | None = None
+            for candidate in login_entries:
+                try:
+                    token, uid, client_headers = onelap.perform_login(candidate, 30.0)
+                    headers = onelap.authenticated_headers(token, uid, client_headers)
+                    onelap.newest_record(headers, 30.0)
+                except (
+                    onelap.DownloadError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                ) as exc:
+                    last_error = exc
+                    continue
+                login_entry = candidate
+                onelap.save_cached_auth(temporary_cache, token, uid, client_headers)
+                break
+            if login_entry is None:
+                raise ValueError(
+                    "HAR 中没有可重放的顽鹿登录请求，请重新录制登录过程"
+                ) from last_error
+
             retained = {
                 "log": {
                     "version": "1.2",
@@ -367,7 +395,7 @@ class AuthService:
                     os.chmod(path, 0o600)
                 except OSError:
                     pass
-            return source
+            return "login"
         finally:
             temporary_har.unlink(missing_ok=True)
             temporary_cache.unlink(missing_ok=True)
@@ -376,7 +404,7 @@ class AuthService:
         temporary = DATA_ROOT / f".onelap_auth.{uuid.uuid4().hex}.json"
         try:
             client = onelap.configure_direct_auth(temporary, account, password, 30.0)
-            client.records(page_size=1, max_pages=1)
+            client.records(page_size=1, max_pages=1, enrich_missing_metrics=False)
             os.replace(temporary, ONELAP_DIRECT_AUTH_PATH)
             try:
                 os.chmod(ONELAP_DIRECT_AUTH_PATH, 0o600)
@@ -544,15 +572,121 @@ class DashboardService:
             "latest_route": latest_fit_route(activities),
         }
 
-    def refresh(self) -> dict[str, Any]:
+    def enrich_direct_records(
+        self,
+        direct: onelap.OneLapOtmClient,
+        records: list[dict[str, Any]],
+        previous_cache: dict[str, Any],
+        progress: Callable[[str, int], None] | None = None,
+    ) -> bool:
+        cached_items = previous_cache.get("activities", [])
+        cached_by_id = {
+            str(item.get("id")): item
+            for item in cached_items
+            if isinstance(item, dict) and item.get("id")
+        } if isinstance(cached_items, list) else {}
+        cache_complete = previous_cache.get("details_enriched") is True
+        failures = 0
+        total = len(records)
+        for index, record in enumerate(records, 1):
+            cached = cached_by_id.get(str(record.get("id")))
+            record_complete = record.get("details_enriched") is True
+            can_reuse = bool(
+                cached
+                and (
+                    cache_complete
+                    or cached.get("details_enriched") is True
+                )
+            )
+            if record_complete:
+                pass
+            elif can_reuse and cached:
+                cached_metrics = {
+                    "total_distance": "distance_m",
+                    "total_time": "duration_s",
+                    "elevation": "elevation_m",
+                    "cal": "calories",
+                    "TSS": "tss",
+                }
+                for record_key, cached_key in cached_metrics.items():
+                    cached_value = number(cached.get(cached_key))
+                    if cached_value > 0 and number(record.get(record_key)) <= 0:
+                        record[record_key] = cached_value
+                if record.get("name") in {None, "", "骑行训练"} and cached.get("name"):
+                    record["name"] = str(cached["name"])
+                record["details_enriched"] = True
+            else:
+                try:
+                    detail = direct.record_detail(str(record["id"]))
+                    enriched = onelap.normalize_otm_record(
+                        {
+                            **detail,
+                            "id": record["id"],
+                            "start_time": record.get("start_time"),
+                        }
+                    )
+                    if not enriched:
+                        raise onelap.ApiRequestError("OneLap activity detail is incomplete")
+                    for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
+                        if number(enriched.get(key)) > 0 or number(record.get(key)) <= 0:
+                            record[key] = enriched[key]
+                    detail_name = str(detail.get("name") or detail.get("title") or "").strip()
+                    if detail_name:
+                        record["name"] = detail_name
+                    if (
+                        number(record.get("total_distance")) <= 0
+                        or number(record.get("total_time")) <= 0
+                    ):
+                        raise onelap.ApiRequestError(
+                            "OneLap activity detail did not repair required metrics"
+                        )
+                    record["details_enriched"] = True
+                except onelap.AuthenticationError:
+                    raise
+                except onelap.DownloadError as exc:
+                    failures += 1
+                    if "risk control" in str(exc).lower():
+                        failures += total - index
+                        if progress:
+                            progress(f"详情读取被顽鹿限流，将在下次刷新继续：{exc}", 90)
+                        break
+            if progress and (index % 25 == 0 or index == total):
+                progress(
+                    f"正在补全训练指标：{index} / {total} 条",
+                    25 + round(index / max(1, total) * 65),
+                )
+        return failures == 0
+
+    def refresh(self, progress: Callable[[str, int], None] | None = None) -> dict[str, Any]:
         if not self.refresh_lock.acquire(blocking=False):
             raise RuntimeError("数据刷新正在进行，请稍候")
         try:
+            previous_cache = read_json(CACHE_PATH, {})
+            details_enriched = False
             if ONELAP_DIRECT_AUTH_PATH.is_file():
+                if progress:
+                    progress("正在连接顽鹿运动…", 8)
                 direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
-                records = direct.records()
+                records = direct.records(
+                    enrich_missing_metrics=False,
+                    progress=(
+                        lambda page, count, total: progress(
+                            f"已读取第 {page} 页，共获取 {count} / {total} 条活动"
+                            if total
+                            else f"已读取第 {page} 页，共获取 {count} 条活动",
+                            min(25, 5 + round((count / total) * 20)) if total else min(24, 5 + page),
+                        )
+                        if progress
+                        else None
+                    )
+                )
                 auth_source = direct.source
+                details_enriched = self.enrich_direct_records(
+                    direct, records, previous_cache, progress
+                )
             else:
+                if progress:
+                    progress("正在读取顽鹿活动…", 12)
                 login_har = str(ONELAP_HAR_PATH) if ONELAP_HAR_PATH.is_file() else None
                 headers, auth_source = onelap.obtain_auth(
                     DATA_ROOT / onelap.TOKEN_CACHE, login_har, login_har, 30.0
@@ -568,6 +702,7 @@ class DashboardService:
                         force_login=True,
                     )
                     records = sync.onelap_records(headers, 30.0)
+                details_enriched = False
             state = read_json(STATE_PATH, {"version": 1, "records": {}})
             states = state.get("records", {})
             if not isinstance(states, dict):
@@ -576,12 +711,111 @@ class DashboardService:
                 "version": 1,
                 "fetched_at": int(time.time()),
                 "auth_source": auth_source,
+                "details_enriched": details_enriched,
                 "activities": [clean_activity(item, states) for item in records],
             }
+            if progress:
+                progress(f"正在保存 {len(records)} 条活动…", 94)
             write_json(CACHE_PATH, payload)
+            if progress:
+                progress(f"刷新完成，共获取 {len(records)} 条活动", 100)
             return self.dashboard()
         finally:
             self.refresh_lock.release()
+
+    def download_all_fits(
+        self, progress: Callable[[str, int], None] | None = None
+    ) -> dict[str, int]:
+        direct: onelap.OneLapOtmClient | None = None
+        headers: dict[str, str] | None = None
+        login_har: str | None = None
+        if progress:
+            progress("正在读取顽鹿活动列表…", 3)
+        if ONELAP_DIRECT_AUTH_PATH.is_file():
+            direct = onelap.OneLapOtmClient(ONELAP_DIRECT_AUTH_PATH, 30.0)
+            records = direct.records(
+                enrich_missing_metrics=False,
+                progress=(
+                    lambda _page, count, total: progress(
+                        f"正在整理活动列表：{count} / {total} 条" if total else f"正在整理活动列表：{count} 条",
+                        min(15, 3 + round((count / total) * 12)) if total else 8,
+                    )
+                    if progress
+                    else None
+                )
+            )
+        else:
+            login_har = str(ONELAP_HAR_PATH) if ONELAP_HAR_PATH.is_file() else None
+            headers, _ = onelap.obtain_auth(
+                DATA_ROOT / onelap.TOKEN_CACHE, login_har, login_har, 30.0
+            )
+            try:
+                records = sync.onelap_records(headers, 30.0)
+            except onelap.AuthenticationError:
+                headers, _ = onelap.obtain_auth(
+                    DATA_ROOT / onelap.TOKEN_CACHE,
+                    login_har,
+                    login_har,
+                    30.0,
+                    force_login=True,
+                )
+                records = sync.onelap_records(headers, 30.0)
+        if not records:
+            raise RuntimeError("顽鹿运动未返回活动记录")
+
+        FIT_DIR.mkdir(parents=True, exist_ok=True)
+        result = {"total": len(records), "downloaded": 0, "existing": 0, "failed": 0}
+        for index, record in enumerate(records, 1):
+            label = str(record.get("name") or record.get("id") or "未命名活动")
+            try:
+                if direct:
+                    filename = onelap.otm_fit_filename(record)
+                    status = direct.download_record_fit(
+                        str(record["id"]),
+                        FIT_DIR / filename,
+                        force=False,
+                        fit_reference=str(record.get("fit_reference") or "") or None,
+                    )
+                else:
+                    assert headers is not None
+                    try:
+                        url, filename = onelap.fit_link(
+                            str(record["id"]), headers, 30.0
+                        )
+                    except onelap.AuthenticationError:
+                        headers, _ = onelap.obtain_auth(
+                            DATA_ROOT / onelap.TOKEN_CACHE,
+                            login_har,
+                            login_har,
+                            30.0,
+                            force_login=True,
+                        )
+                        url, filename = onelap.fit_link(
+                            str(record["id"]), headers, 30.0
+                        )
+                    status = onelap.download_fit(
+                        url, FIT_DIR / filename, 30.0, force=False
+                    )
+                key = "existing" if status == "exists" else "downloaded"
+                result[key] += 1
+                line = f"[{index}/{len(records)}] {'已存在' if key == 'existing' else '已下载'} | {label}"
+            except onelap.AuthenticationError:
+                raise
+            except (onelap.DownloadError, OSError, KeyError) as exc:
+                normalized_error = str(exc).lower()
+                if "risk control" in normalized_error or "风控" in normalized_error:
+                    raise
+                result["failed"] += 1
+                line = f"[{index}/{len(records)}] 失败 | {label} | {exc}"
+            if progress:
+                progress(line, 15 + round(index / len(records) * 85))
+
+        if progress:
+            progress(
+                f"下载完成：新增 {result['downloaded']}，已存在 {result['existing']}，失败 {result['failed']}",
+                100,
+            )
+        return result
 
 
 class JobManager:
@@ -593,21 +827,24 @@ class JobManager:
         with self.lock:
             active = next((job for job in self.jobs.values() if job["status"] == "running"), None)
             if active:
-                raise RuntimeError("已有同步任务正在运行")
+                raise RuntimeError("已有任务正在运行")
             job_id = uuid.uuid4().hex[:12]
-            command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
-            strava_mode = preferred_strava_mode()
-            command.extend(["--strava-mode", strava_mode])
-            if ONELAP_DIRECT_AUTH_PATH.is_file():
-                command.extend(["--onelap-auth", str(ONELAP_DIRECT_AUTH_PATH)])
-            elif ONELAP_HAR_PATH.is_file():
-                command.extend(
-                    ["--har", str(ONELAP_HAR_PATH), "--login-har", str(ONELAP_HAR_PATH)]
-                )
-            if mode == "preview":
-                command.append("--dry-run")
-            else:
-                command.extend(["--max-uploads", str(max_uploads), "--newest-first"])
+            command: list[str] = []
+            strava_mode = ""
+            if mode not in {"refresh", "download"}:
+                command = [sys.executable, str(APP_ROOT / "sync_to_strava.py")]
+                strava_mode = preferred_strava_mode()
+                command.extend(["--strava-mode", strava_mode])
+                if ONELAP_DIRECT_AUTH_PATH.is_file():
+                    command.extend(["--onelap-auth", str(ONELAP_DIRECT_AUTH_PATH)])
+                elif ONELAP_HAR_PATH.is_file():
+                    command.extend(
+                        ["--har", str(ONELAP_HAR_PATH), "--login-har", str(ONELAP_HAR_PATH)]
+                    )
+                if mode == "preview":
+                    command.append("--dry-run")
+                else:
+                    command.extend(["--max-uploads", str(max_uploads), "--newest-first"])
             job = {
                 "id": job_id,
                 "mode": mode,
@@ -619,8 +856,65 @@ class JobManager:
                 "lines": [],
             }
             self.jobs[job_id] = job
-            threading.Thread(target=self._run, args=(job_id, command), daemon=True).start()
+            target = (
+                self._run_refresh
+                if mode == "refresh"
+                else self._run_download
+                if mode == "download"
+                else self._run
+            )
+            args = (job_id,) if mode in {"refresh", "download"} else (job_id, command)
+            threading.Thread(target=target, args=args, daemon=True).start()
             return dict(job)
+
+    def _update_progress(self, job_id: str, line: str, progress: int) -> None:
+        with self.lock:
+            job = self.jobs[job_id]
+            job["lines"].append(line)
+            job["lines"] = job["lines"][-500:]
+            job["progress"] = max(0, min(100, progress))
+
+    def _run_refresh(self, job_id: str) -> None:
+        try:
+            result = SERVICE.refresh(
+                lambda line, progress: self._update_progress(job_id, line, progress)
+            )
+            with self.lock:
+                job = self.jobs[job_id]
+                job["result"] = {"activities": result["summary"]["total_rides"]}
+                job["status"] = "completed"
+                job["exit_code"] = 0
+                job["finished_at"] = int(time.time())
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                job["status"] = "failed"
+                job["exit_code"] = -1
+                job["finished_at"] = int(time.time())
+                job["lines"].append(f"刷新失败：{exc}")
+
+    def _run_download(self, job_id: str) -> None:
+        try:
+            result = SERVICE.download_all_fits(
+                lambda line, progress: self._update_progress(job_id, line, progress)
+            )
+            with self.lock:
+                job = self.jobs[job_id]
+                job["result"] = result
+                all_failed = (
+                    result.get("failed", 0) > 0
+                    and result.get("downloaded", 0) + result.get("existing", 0) == 0
+                )
+                job["status"] = "failed" if all_failed else "completed"
+                job["exit_code"] = 1 if all_failed else 0
+                job["finished_at"] = int(time.time())
+        except Exception as exc:
+            with self.lock:
+                job = self.jobs[job_id]
+                job["status"] = "failed"
+                job["exit_code"] = -1
+                job["finished_at"] = int(time.time())
+                job["lines"].append(f"下载失败：{exc}")
 
     def _run(self, job_id: str, command: list[str]) -> None:
         env = dict(os.environ)
@@ -659,6 +953,13 @@ class JobManager:
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self.lock:
             job = self.jobs.get(job_id)
+            return json.loads(json.dumps(job)) if job else None
+
+    def current(self) -> dict[str, Any] | None:
+        with self.lock:
+            jobs = list(self.jobs.values())
+            running = next((job for job in reversed(jobs) if job["status"] == "running"), None)
+            job = running or (jobs[-1] if jobs else None)
             return json.loads(json.dumps(job)) if job else None
 
 
@@ -745,6 +1046,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard":
             self.send_json(SERVICE.dashboard())
             return
+        if path == "/api/jobs/current":
+            self.send_json({"job": JOBS.current()})
+            return
         if path.startswith("/api/jobs/"):
             job = JOBS.get(path.rsplit("/", 1)[-1])
             if job is None:
@@ -814,10 +1118,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/jobs":
                 mode = str(body.get("mode") or "sync")
-                if mode not in {"sync", "preview"}:
+                if mode not in {"sync", "preview", "refresh", "download"}:
                     raise ValueError("不支持的任务类型")
                 max_uploads = integer(body.get("max_uploads"), 15)
-                if not 1 <= max_uploads <= 100:
+                if mode in {"sync", "preview"} and not 1 <= max_uploads <= 100:
                     raise ValueError("单次同步数量必须在 1 到 100 之间")
                 self.send_json(JOBS.start(mode, max_uploads), HTTPStatus.ACCEPTED)
                 return

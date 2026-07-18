@@ -38,7 +38,7 @@ docker run --rm --name magene2strava `
 
 ### Docker Compose
 
-项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并将数据保存在当前目录的 `magene2strava-data`：
+项目已提供 `compose.yaml`，默认在 Docker 主机的所有网卡监听 `8848` 端口，并继续将数据保存在当前目录的 `magene2strava-data`，升级后会直接沿用已有授权、同步状态和 FIT 文件：
 
 ```powershell
 docker compose up -d
@@ -53,6 +53,8 @@ docker compose logs -f
 docker compose down
 ```
 
+Linux/NAS 新安装如需避免绑定目录权限差异，可在项目目录的 `.env` 中设置 `MAGENE2STRAVA_DATA_SOURCE=magene2strava-data`，改用 Compose 命名卷；已有安装请保持默认值，以继续读取原目录数据。
+
 如需修改宿主机端口，请修改 `compose.yaml` 中端口映射左侧的 `8848`：
 
 ```yaml
@@ -63,9 +65,10 @@ ports:
 ## 使用流程
 
 1. 点击“刷新数据”读取顽鹿活动与训练指标。
-2. 点击“开始同步”，设置单次最大上传数量。
-3. 可先运行“仅检查计划”，确认队列后再同步。
-4. 同步日志会在页面内实时更新；重复活动会自动跳过。
+2. 点击“下载全部 FIT”可将所有活动文件保存到数据目录的 `fits/`；已存在的文件会自动跳过。
+3. 点击“开始同步”，设置单次最大上传数量。
+4. 可先运行“仅检查计划”，确认队列后再同步。
+5. 下载和同步日志会在页面内实时更新；重复活动会自动跳过。
 
 ## 授权维护
 
@@ -73,7 +76,7 @@ ports:
 
 - 顽鹿运动：直接填写账号和密码。原始密码仅用于本次登录，落盘保存的是账号、MD5 登录摘要、token 和 refresh token；过期后会先刷新 token，必要时自动重新登录。
 - Strava：默认使用 Web 会话，可粘贴已登录浏览器请求中的 `Cookie` 请求头，或导入 Strava HAR。
-- Strava API OAuth：在 Strava 授权弹窗的高级选项中填写 Client ID 和 Client Secret；仅作为 Web 会话的备用模式。
+- Strava API OAuth：在 Strava 授权弹窗的高级选项中填写 Client ID 和 Client Secret；Web 会话失效时会自动回退到 API 模式。
 
 顽鹿登录摘要与 Strava Cookie 都属于可用凭据。不要把授权文件、HAR、Cookie 或整个数据目录分享给他人；通过 NAS 或远程服务器使用时，建议在反向代理中启用 HTTPS。
 
@@ -111,5 +114,5 @@ node --check web/app.js
 - `POST /api/auth/strava/web-session`：导入 Strava Cookie 请求头
 - `POST /api/auth/strava/har`：从 HAR 导入 Strava Web 会话
 - `POST /api/auth/strava/start`：发起备用的 Strava API OAuth
-- `POST /api/jobs`：启动同步预检或正式同步
+- `POST /api/jobs`：启动刷新、FIT 下载、同步预检或正式同步
 - `GET /api/jobs/{id}`：读取任务进度与日志

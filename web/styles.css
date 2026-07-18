@@ -262,6 +262,111 @@ svg {
   margin-left: var(--sidebar-width);
 }
 
+.current-job {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(200px, 0.7fr) auto;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 34px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.current-job-copy {
+  min-width: 0;
+}
+
+.current-job-copy > strong,
+.current-job-copy > span {
+  display: block;
+}
+
+.current-job-state {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.current-job-state i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.current-job.is-running .current-job-state i {
+  animation: job-pulse 1.6s ease-in-out infinite;
+}
+
+.current-job.is-success .current-job-state i { background: var(--success); }
+.current-job.is-error .current-job-state i { background: var(--danger); }
+
+.current-job-copy > strong {
+  font-size: 15px;
+}
+
+.current-job-copy > span:last-child {
+  overflow: hidden;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.current-job-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.current-job-progress > span {
+  height: 4px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--line);
+}
+
+.current-job-progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 400ms ease;
+}
+
+.current-job.is-success .current-job-progress i { background: var(--success); }
+.current-job.is-error .current-job-progress i { background: var(--danger); }
+
+.current-job-progress strong {
+  width: 38px;
+  font-size: 12px;
+  text-align: right;
+}
+
+@keyframes job-pulse {
+  50% { box-shadow: 0 0 0 5px rgba(252, 76, 2, 0.12); }
+}
+
+@media (max-width: 720px) {
+  .current-job {
+    grid-template-columns: 1fr auto;
+    gap: 14px;
+  }
+
+  .current-job-progress {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
 .topbar {
   position: sticky;
   z-index: 20;
@@ -1657,6 +1762,21 @@ dialog h2 {
 
   .topbar .eyebrow,
   .button-quiet {
+    display: none;
+  }
+
+  .topbar .top-download {
+    display: inline-flex;
+    width: 38px;
+    min-height: 38px;
+    padding: 0;
+  }
+
+  .current-job .current-job-button {
+    display: inline-flex;
+  }
+
+  .top-download span {
     display: none;
   }
 

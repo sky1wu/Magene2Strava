@@ -10,6 +10,485 @@ import web_app
 
 
 class WebAppTests(unittest.TestCase):
+    def test_download_all_fits_reauthenticates_legacy_har_mid_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fit_dir = root / "fits"
+            har_path = root / "onelap.har"
+            har_path.write_text("{}", encoding="utf-8")
+            records = [{"id": "ride", "name": "测试骑行", "start_time": 100}]
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "FIT_DIR", fit_dir),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", root / "missing.json"),
+                patch.object(web_app, "ONELAP_HAR_PATH", har_path),
+                patch.object(
+                    web_app.onelap,
+                    "obtain_auth",
+                    side_effect=[({"Authorization": "old"}, "cache"), ({"Authorization": "new"}, "login")],
+                ) as obtain_auth,
+                patch.object(web_app.sync, "onelap_records", return_value=records),
+                patch.object(
+                    web_app.onelap,
+                    "fit_link",
+                    side_effect=[
+                        web_app.onelap.AuthenticationError("expired"),
+                        ("https://fits.rfsvr.net/ride.fit", "ride.fit"),
+                    ],
+                ) as fit_link,
+                patch.object(web_app.onelap, "download_fit", return_value="downloaded"),
+            ):
+                result = web_app.DashboardService().download_all_fits()
+
+        self.assertEqual(result["downloaded"], 1)
+        self.assertEqual(fit_link.call_count, 2)
+        self.assertEqual(obtain_auth.call_count, 2)
+        self.assertTrue(obtain_auth.call_args_list[1].kwargs["force_login"])
+
+    def test_enrich_direct_records_reuses_cache_and_fetches_missing_details(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "id": 336072,
+                    "name": "详细骑行",
+                    "elevation": 88,
+                    "cal": 520,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [
+            {"id": "cached", "name": "骑行训练", "start_time": 100, "elevation": 0, "cal": 0, "TSS": 0},
+            {"id": "missing", "name": "骑行训练", "start_time": 200, "elevation": 0, "cal": 100, "TSS": 0},
+        ]
+        previous = {
+            "details_enriched": True,
+            "activities": [{"id": "cached", "name": "缓存骑行", "elevation_m": 42, "calories": 300, "tss": 18}],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["missing"])
+        self.assertEqual(records[0]["elevation"], 42)
+        self.assertEqual(records[0]["name"], "缓存骑行")
+        self.assertEqual(records[1]["id"], "missing")
+        self.assertEqual(records[1]["elevation"], 88)
+        self.assertEqual(records[1]["cal"], 520)
+
+    def test_enrich_direct_records_refetches_partial_account_cache(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "elevation": 88,
+                    "cal": 520,
+                    "TSS": 35,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [{
+            "id": "partial",
+            "name": "列表活动名",
+            "start_time": 200,
+            "elevation": 0,
+            "cal": 100,
+            "TSS": 12,
+        }]
+        previous = {
+            "auth_source": "account",
+            "details_enriched": False,
+            "activities": [{
+                "id": "partial",
+                "name": "旧缓存名",
+                "elevation_m": 42,
+                "calories": 0,
+                "tss": 0,
+            }],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["partial"])
+        self.assertEqual(records[0]["elevation"], 88)
+        self.assertEqual(records[0]["cal"], 520)
+        self.assertEqual(records[0]["TSS"], 35)
+        self.assertEqual(records[0]["name"], "列表活动名")
+
+    def test_enrich_direct_records_refetches_legacy_har_cache(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "elevation": 88,
+                    "cal": 520,
+                    "TSS": 35,
+                    "totalDistance": 42000,
+                    "time": 3600,
+                }
+
+        records = [{
+            "id": "legacy",
+            "name": "列表活动名",
+            "start_time": 200,
+            "elevation": 0,
+            "cal": 0,
+            "TSS": 0,
+        }]
+        previous = {
+            "auth_source": "cache",
+            "activities": [{
+                "id": "legacy",
+                "name": "旧 HAR 缓存",
+                "elevation_m": 0,
+                "calories": 0,
+                "tss": 0,
+            }],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["legacy"])
+        self.assertEqual(records[0]["elevation"], 88)
+        self.assertEqual(records[0]["cal"], 520)
+        self.assertEqual(records[0]["TSS"], 35)
+
+    def test_enrich_direct_records_skips_details_already_fetched_by_list(self) -> None:
+        class FakeClient:
+            def record_detail(self, _record_id):
+                raise AssertionError("detail must not be fetched twice")
+
+        records = [{
+            "id": "prefetched",
+            "name": "骑行训练",
+            "start_time": 200,
+            "total_distance": 42000,
+            "total_time": 3600,
+            "elevation": 88,
+            "cal": 520,
+            "TSS": 35,
+            "details_enriched": True,
+        }]
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            FakeClient(), records, {}
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(records[0]["elevation"], 88)
+
+    def test_enrich_direct_records_reuses_completed_rows_from_partial_cache(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+
+            def record_detail(self, record_id):
+                self.requested.append(record_id)
+                return {
+                    "elevation": 24,
+                    "cal": 210,
+                    "TSS": 17,
+                    "totalDistance": 12000,
+                    "time": 1800,
+                }
+
+        records = [
+            {"id": "complete", "name": "骑行训练", "start_time": 100},
+            {"id": "pending", "name": "骑行训练", "start_time": 200},
+        ]
+        previous = {
+            "auth_source": "account",
+            "details_enriched": False,
+            "activities": [
+                {
+                    "id": "complete",
+                    "name": "已补全",
+                    "distance_m": 32000,
+                    "duration_s": 3600,
+                    "elevation_m": 42,
+                    "calories": 300,
+                    "tss": 18,
+                    "details_enriched": True,
+                },
+                {
+                    "id": "pending",
+                    "name": "待补全",
+                    "elevation_m": 0,
+                    "calories": 0,
+                    "tss": 0,
+                    "details_enriched": False,
+                },
+            ],
+        }
+        client = FakeClient()
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            client, records, previous
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(client.requested, ["pending"])
+        self.assertEqual(records[0]["total_distance"], 32000)
+        self.assertEqual(records[0]["total_time"], 3600)
+        self.assertEqual(records[0]["elevation"], 42)
+        self.assertTrue(records[0]["details_enriched"])
+        self.assertTrue(records[1]["details_enriched"])
+
+    def test_enrich_direct_records_propagates_authentication_failures(self) -> None:
+        class FakeClient:
+            def record_detail(self, _record_id):
+                raise web_app.onelap.AuthenticationError("expired login")
+
+        records = [{"id": "expired", "name": "骑行训练", "start_time": 200}]
+
+        with self.assertRaisesRegex(
+            web_app.onelap.AuthenticationError, "expired login"
+        ):
+            web_app.DashboardService().enrich_direct_records(
+                FakeClient(), records, {}
+            )
+
+    def test_enrich_direct_records_leaves_unrepaired_metrics_pending(self) -> None:
+        class FakeClient:
+            def record_detail(self, _record_id):
+                return {"elevation": 42, "cal": 300, "totalDistance": 0, "time": 0}
+
+        records = [{
+            "id": "missing",
+            "name": "骑行训练",
+            "start_time": 200,
+            "total_distance": 0,
+            "total_time": 0,
+        }]
+
+        complete = web_app.DashboardService().enrich_direct_records(
+            FakeClient(), records, {}
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(records[0]["elevation"], 42)
+        self.assertFalse(records[0].get("details_enriched", False))
+
+    def test_har_refresh_keeps_cache_marked_unenriched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_path = root / "dashboard.json"
+            state_path = root / "state.json"
+            har_path = root / "onelap.har"
+            har_path.write_text("{}", encoding="utf-8")
+            records = [{
+                "id": "legacy",
+                "name": "HAR 活动",
+                "start_time": 200,
+                "total_distance": 12000,
+                "total_time": 1800,
+            }]
+            service = web_app.DashboardService()
+
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "CACHE_PATH", cache_path),
+                patch.object(web_app, "STATE_PATH", state_path),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", root / "missing.json"),
+                patch.object(web_app, "ONELAP_HAR_PATH", har_path),
+                patch.object(
+                    web_app.onelap,
+                    "obtain_auth",
+                    return_value=({"Authorization": "token"}, "cache"),
+                ),
+                patch.object(web_app.sync, "onelap_records", return_value=records),
+                patch.object(service, "dashboard", return_value={}),
+            ):
+                service.refresh()
+
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertFalse(cached["details_enriched"])
+            self.assertFalse(cached["activities"][0]["details_enriched"])
+
+    def test_direct_refresh_lists_without_eager_metric_enrichment(self) -> None:
+        class FakeClient:
+            source = "account"
+
+            def __init__(self):
+                self.enrich_missing_metrics = None
+
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
+                return [{
+                    "id": "cached",
+                    "name": "缓存活动",
+                    "start_time": 200,
+                    "total_distance": 12000,
+                    "total_time": 1800,
+                }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            client = FakeClient()
+            service = web_app.DashboardService()
+            with (
+                patch.object(web_app, "CACHE_PATH", root / "dashboard.json"),
+                patch.object(web_app, "STATE_PATH", root / "state.json"),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
+                patch.object(service, "enrich_direct_records", return_value=True),
+                patch.object(service, "dashboard", return_value={}),
+            ):
+                service.refresh()
+
+        self.assertFalse(client.enrich_missing_metrics)
+
+    def test_download_all_fits_skips_existing_and_continues_after_error(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.enrich_missing_metrics = None
+
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
+                if progress:
+                    progress(1, 3, 3)
+                return [
+                    {"id": "one", "name": "活动一", "start_time": 1_720_000_001},
+                    {"id": "two", "name": "活动二", "start_time": 1_720_000_002},
+                    {"id": "three", "name": "活动三", "start_time": 1_720_000_003},
+                ]
+
+            def download_record_fit(
+                self, record_id, target, force=False, fit_reference=None
+            ):
+                if record_id == "three":
+                    raise web_app.onelap.DownloadError("network")
+                return "exists" if record_id == "two" else "downloaded"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            fit_dir = root / "fits"
+            lines = []
+            client = FakeClient()
+            with (
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app, "FIT_DIR", fit_dir),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
+            ):
+                result = web_app.DashboardService().download_all_fits(
+                    lambda line, progress: lines.append((line, progress))
+                )
+
+        self.assertEqual(
+            result, {"total": 3, "downloaded": 1, "existing": 1, "failed": 1}
+        )
+        self.assertEqual(lines[-1][1], 100)
+        self.assertIn("新增 1", lines[-1][0])
+        self.assertFalse(client.enrich_missing_metrics)
+
+    def test_download_all_fits_stops_on_risk_control(self) -> None:
+        class FakeClient:
+            def __init__(self):
+                self.requested = []
+                self.enrich_missing_metrics = None
+
+            def records(self, progress=None, enrich_missing_metrics=True):
+                self.enrich_missing_metrics = enrich_missing_metrics
+                return [
+                    {"id": "one", "name": "活动一", "start_time": 1_720_000_001},
+                    {"id": "two", "name": "活动二", "start_time": 1_720_000_002},
+                ]
+
+            def download_record_fit(
+                self, record_id, target, force=False, fit_reference=None
+            ):
+                self.requested.append(record_id)
+                raise web_app.onelap.ApiRequestError(
+                    "OneLap risk control rejected the request"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "auth.json"
+            auth_path.write_text("{}", encoding="utf-8")
+            client = FakeClient()
+            with (
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(web_app, "FIT_DIR", root / "fits"),
+                patch.object(web_app.onelap, "OneLapOtmClient", return_value=client),
+            ):
+                with self.assertRaisesRegex(
+                    web_app.onelap.ApiRequestError, "risk control"
+                ):
+                    web_app.DashboardService().download_all_fits()
+
+        self.assertEqual(client.requested, ["one"])
+        self.assertFalse(client.enrich_missing_metrics)
+
+    def test_local_jobs_skip_strava_setup(self) -> None:
+        for mode in ("refresh", "download"):
+            with self.subTest(mode=mode):
+                manager = web_app.JobManager()
+                with (
+                    patch.object(
+                        web_app, "preferred_strava_mode", side_effect=AssertionError("unused")
+                    ),
+                    patch.object(web_app.threading, "Thread") as thread,
+                ):
+                    job = manager.start(mode, 15)
+
+                self.assertEqual(job["mode"], mode)
+                self.assertEqual(job["strava_mode"], "")
+                thread.assert_called_once()
+
+    def test_job_manager_current_prefers_running_job(self) -> None:
+        manager = web_app.JobManager()
+        manager.jobs = {
+            "done": {"id": "done", "status": "completed"},
+            "running": {"id": "running", "status": "running"},
+        }
+
+        self.assertEqual(manager.current()["id"], "running")
+
+    def test_download_job_is_failed_when_every_file_fails(self) -> None:
+        manager = web_app.JobManager()
+        manager.jobs = {
+            "download": {
+                "id": "download",
+                "status": "running",
+                "lines": [],
+            }
+        }
+        result = {"total": 2, "downloaded": 0, "existing": 0, "failed": 2}
+
+        with patch.object(web_app.SERVICE, "download_all_fits", return_value=result):
+            manager._run_download("download")
+
+        self.assertEqual(manager.jobs["download"]["result"], result)
+        self.assertEqual(manager.jobs["download"]["status"], "failed")
+        self.assertEqual(manager.jobs["download"]["exit_code"], 1)
+
     def test_preferred_strava_mode_prioritizes_web_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -32,27 +511,97 @@ class WebAppTests(unittest.TestCase):
             with (
                 patch.object(web_app, "STRAVA_WEB_SESSION_PATH", session_path),
                 patch.object(web_app, "STRAVA_CONFIG_PATH", config_path),
+                patch.object(web_app.sync, "StravaWebClient"),
             ):
                 self.assertEqual(web_app.preferred_strava_mode(), "web")
                 session_path.unlink()
                 self.assertEqual(web_app.preferred_strava_mode(), "api")
 
+    def test_preferred_strava_mode_falls_back_from_expired_web_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_path = root / "web.json"
+            config_path = root / "api.json"
+            session_path.write_text(
+                json.dumps({"cookies": [{"name": "session", "value": "expired"}]}),
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                json.dumps({"client_id": "1", "client_secret": "secret", "refresh_token": "refresh"}),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(web_app, "STRAVA_WEB_SESSION_PATH", session_path),
+                patch.object(web_app, "STRAVA_CONFIG_PATH", config_path),
+                patch.object(
+                    web_app.sync,
+                    "StravaWebClient",
+                    side_effect=web_app.sync.WebSessionExpiredError("expired"),
+                ),
+            ):
+                self.assertEqual(web_app.preferred_strava_mode(), "api")
+
+    def test_onelap_login_validation_skips_metric_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / "onelap_auth.json"
+            calls = []
+
+            class FakeClient:
+                source = "account"
+
+                def records(self, **kwargs):
+                    calls.append(kwargs)
+                    return [{"id": "ride"}]
+
+            def fake_configure(path, *_args):
+                path.write_text("{}", encoding="utf-8")
+                return FakeClient()
+
+            with (
+                patch.object(web_app, "DATA_ROOT", root),
+                patch.object(web_app, "ONELAP_DIRECT_AUTH_PATH", auth_path),
+                patch.object(
+                    web_app.onelap,
+                    "configure_direct_auth",
+                    side_effect=fake_configure,
+                ),
+            ):
+                source = web_app.AuthService().login_onelap("rider", "secret")
+            auth_saved = auth_path.is_file()
+
+        self.assertEqual(source, "account")
+        self.assertEqual(calls, [{
+            "page_size": 1,
+            "max_pages": 1,
+            "enrich_missing_metrics": False,
+        }])
+        self.assertTrue(auth_saved)
+
     def test_onelap_har_import_retains_only_login_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             retained_path = root / "onelap_auth.har"
-            login_request = {
+            working_login_request = {
                 "url": f"https://{web_app.onelap.API_HOST}{web_app.onelap.LOGIN_PATH}",
                 "method": "POST",
                 "headers": [{"name": "Content-Type", "value": "application/json"}],
                 "postData": {"text": '{"account":"encrypted","password":"hash"}'},
             }
+            failed_login_request = {
+                **working_login_request,
+                "postData": {"text": '{"account":"new","password":"wrong"}'},
+            }
             har = {
                 "log": {
                     "entries": [
                         {
+                            "startedDateTime": "2026-07-17T00:00:00Z",
+                            "request": working_login_request,
+                        },
+                        {
                             "startedDateTime": "2026-07-18T00:00:00Z",
-                            "request": login_request,
+                            "request": failed_login_request,
                             "response": {"content": {"text": "sensitive response"}},
                         },
                         {"request": {"url": "https://example.com/private"}},
@@ -60,17 +609,15 @@ class WebAppTests(unittest.TestCase):
                 }
             }
 
-            def fake_auth(cache_path, *_args, **_kwargs):
-                web_app.sync.save_json(
-                    cache_path,
-                    {"token": "token", "uid": "uid", "expires_at": 9_999_999_999},
-                )
-                return {"Authorization": "token"}, "login"
+            def fake_login(entry, _timeout):
+                if entry["request"] == failed_login_request:
+                    raise web_app.onelap.AuthenticationError("invalid login")
+                return "token", "uid", {"User-Agent": "test"}
 
             with (
                 patch.object(web_app, "DATA_ROOT", root),
                 patch.object(web_app, "ONELAP_HAR_PATH", retained_path),
-                patch.object(web_app.onelap, "obtain_auth", side_effect=fake_auth),
+                patch.object(web_app.onelap, "perform_login", side_effect=fake_login) as login,
                 patch.object(web_app.onelap, "newest_record", return_value={"id": "ride"}),
             ):
                 source = web_app.AuthService().import_onelap_har(har)
@@ -79,8 +626,25 @@ class WebAppTests(unittest.TestCase):
             entries = retained["log"]["entries"]
             self.assertEqual(source, "login")
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["request"], login_request)
+            self.assertEqual(entries[0]["request"], working_login_request)
             self.assertNotIn("response", entries[0])
+            self.assertEqual(login.call_count, 2)
+
+    def test_onelap_har_import_rejects_unreplayable_login_requests(self) -> None:
+        login_request = {
+            "url": f"https://{web_app.onelap.API_HOST}{web_app.onelap.LOGIN_PATH}",
+            "method": "POST",
+            "postData": {"text": '{"account":"encrypted","password":"wrong"}'},
+        }
+        har = {"log": {"entries": [{"request": login_request}]}}
+
+        with patch.object(
+            web_app.onelap,
+            "perform_login",
+            side_effect=web_app.onelap.AuthenticationError("invalid login"),
+        ):
+            with self.assertRaisesRegex(ValueError, "可重放"):
+                web_app.AuthService().import_onelap_har(har)
 
     def test_onelap_har_import_requires_login_request(self) -> None:
         har = {"log": {"entries": [{"request": {"url": "https://example.com"}}]}}
@@ -98,6 +662,7 @@ class WebAppTests(unittest.TestCase):
             "elevation": 122.4,
             "cal": 530,
             "TSS": 46.8,
+            "details_enriched": True,
         }
         states = {"ride-1": {"status": "uploaded", "activity_id": "987"}}
 
@@ -108,6 +673,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(result["duration_s"], 3_601)
         self.assertEqual(result["status"], "uploaded")
         self.assertEqual(result["activity_id"], "987")
+        self.assertTrue(result["details_enriched"])
 
     def test_local_activities_reads_supported_fit_names(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -183,6 +749,7 @@ class WebAppTests(unittest.TestCase):
     def test_number_helpers_fail_closed(self) -> None:
         self.assertEqual(web_app.number("not-a-number"), 0)
         self.assertEqual(web_app.integer(None), 0)
+        self.assertEqual(web_app.integer(None, 15), 15)
 
     def test_project_route_preserves_shape_without_absolute_location(self) -> None:
         coordinates = [

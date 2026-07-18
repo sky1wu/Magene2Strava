@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -253,6 +253,20 @@ def _numeric(record: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _positive_numeric(record: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = record.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return 0.0
+
+
 def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
     record_id = str(record.get("id") or record.get("activity_id") or "").strip()
     started = _epoch(
@@ -262,21 +276,32 @@ def normalize_otm_record(record: dict[str, Any]) -> dict[str, Any] | None:
     )
     if not record_id or not started:
         return None
+    distance = _positive_numeric(
+        record, "total_distance", "totalDistance", "distance", "distance_m"
+    )
+    if distance <= 0:
+        distance = _positive_numeric(record, "distance_km") * 1000
     return {
         "id": record_id,
         "name": str(record.get("name") or record.get("title") or "骑行训练"),
         "start_time": started,
-        "total_distance": _numeric(
-            record, "total_distance", "totalDistance", "distance", "distance_m"
-        ),
+        "total_distance": distance,
         "total_time": int(
-            _numeric(record, "total_time", "totalTime", "time", "duration", "duration_s")
+            _positive_numeric(
+                record,
+                "total_time",
+                "totalTime",
+                "time",
+                "duration",
+                "duration_s",
+                "time_seconds",
+            )
         ),
         "elevation": _numeric(
             record, "elevation", "total_ascent", "totalAscent", "ascent"
         ),
         "cal": _numeric(record, "cal", "calories", "kcal"),
-        "TSS": _numeric(record, "TSS", "tss"),
+        "TSS": _numeric(record, "TSS", "tss", "load_tss"),
         "source": "onelap-otm",
     }
 
@@ -485,10 +510,16 @@ class OneLapOtmClient:
             raise ApiRequestError("OneLap OTM activity detail is invalid")
         riding_record = data.get("ridingRecord")
         if isinstance(riding_record, dict):
-            return riding_record
+            return {**data, **riding_record}
         return data
 
-    def records(self, page_size: int = 50, max_pages: int = 200) -> list[dict[str, Any]]:
+    def records(
+        self,
+        page_size: int = 50,
+        max_pages: int = 200,
+        progress: Callable[[int, int, int], None] | None = None,
+        enrich_missing_metrics: bool = True,
+    ) -> list[dict[str, Any]]:
         records: dict[str, dict[str, Any]] = {}
         expected = 0
         for page in range(1, max_pages + 1):
@@ -505,12 +536,38 @@ class OneLapOtmClient:
                 if not isinstance(raw, dict):
                     continue
                 normalized = normalize_otm_record(raw)
-                if normalized and (
+                if enrich_missing_metrics and normalized and (
                     normalized["total_distance"] <= 0 or normalized["total_time"] <= 0
                 ):
+                    missing_distance = normalized["total_distance"] <= 0
+                    missing_time = normalized["total_time"] <= 0
                     try:
                         detail = self.record_detail(str(normalized["id"]))
-                        normalized = normalize_otm_record({**raw, **detail})
+                        # Detail data contains a device/user numeric `id` which is
+                        # not the activity ID used by the list and analysis APIs.
+                        # Keep the list record authoritative for identity while
+                        # allowing positive detail metrics to replace list zeros.
+                        detail_normalized = normalize_otm_record(
+                            {
+                                **detail,
+                                "id": normalized["id"],
+                                "start_time": normalized["start_time"],
+                            }
+                        )
+                        if detail_normalized:
+                            for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
+                                if detail_normalized[key] > 0:
+                                    normalized[key] = detail_normalized[key]
+                            fit_reference = str(
+                                detail.get("fitUrl") or detail.get("fit_url") or ""
+                            ).strip()
+                            if fit_reference:
+                                normalized["fit_reference"] = fit_reference
+                            repaired_required_metrics = (
+                                not missing_distance or normalized["total_distance"] > 0
+                            ) and (not missing_time or normalized["total_time"] > 0)
+                            if repaired_required_metrics:
+                                normalized["details_enriched"] = True
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
                             raise
@@ -521,15 +578,42 @@ class OneLapOtmClient:
                     expected = max(expected, int(data.get(key) or 0))
                 except (TypeError, ValueError):
                     pass
-            if not batch or len(batch) < page_size or (expected and len(records) >= expected):
+            pagination = data.get("pagination")
+            if isinstance(pagination, dict):
+                try:
+                    expected = max(expected, int(pagination.get("total") or 0))
+                except (TypeError, ValueError):
+                    pass
+            if progress:
+                progress(page, len(records), expected)
+            # OneLap may cap the response below the requested page size.  A short
+            # page therefore does not mean pagination is complete.
+            has_more = pagination.get("has_more") if isinstance(pagination, dict) else None
+            if not batch or has_more is False or (expected and len(records) >= expected):
                 break
         return list(records.values())
 
-    def download_record_fit(self, record_id: str, target: Path, force: bool = False) -> str:
+    def download_record_fit(
+        self,
+        record_id: str,
+        target: Path,
+        force: bool = False,
+        fit_reference: str | None = None,
+    ) -> str:
         if target.exists() and not force:
             return "exists"
-        encoded_id = quote(record_id, safe="")
-        path = f"/api/otm/ride_record/analysis/fit_content/{encoded_id}"
+        reference = str(fit_reference or "").strip()
+        if not reference:
+            detail = self.record_detail(record_id)
+            reference = str(
+                detail.get("fitUrl") or detail.get("fit_url") or ""
+            ).strip()
+        if not reference:
+            raise ApiRequestError("OneLap activity detail has no FIT reference")
+        encoded_reference = quote(
+            base64.b64encode(reference.encode("utf-8")).decode("ascii"), safe=""
+        )
+        path = f"/api/otm/ride_record/analysis/fit_content/{encoded_reference}"
         raw: bytes | None = None
         last_error: ApiRequestError | None = None
         for base_url in (OTM_BASE_URL, OTM_FALLBACK_BASE_URL):
@@ -542,6 +626,30 @@ class OneLapOtmClient:
                     raise
         if raw is None:
             raise last_error or ApiRequestError("OneLap FIT download failed")
+        if raw.lstrip().startswith(b"{"):
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                try:
+                    code = int(payload.get("code"))
+                except (TypeError, ValueError):
+                    code = -1
+                message = str(
+                    payload.get("msg")
+                    or payload.get("message")
+                    or payload.get("error")
+                    or "unknown"
+                )
+                normalized_message = message.lower()
+                if code == -2 or any(
+                    marker in normalized_message
+                    for marker in ("risk control", "risk_control", "风控")
+                ):
+                    raise ApiRequestError(
+                        f"OneLap risk control rejected the FIT request: {message}"
+                    )
         if len(raw) < 12 or raw[8:12] != b".FIT":
             raise ApiRequestError("OneLap FIT endpoint returned invalid content")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -775,7 +883,12 @@ def obtain_auth(
 
     login_match = find_har_entry(har_paths(login_har_path or har_path), LOGIN_PATH)
     if not force_login and login_match:
-        captured = auth_from_login_capture(login_match[1])
+        try:
+            captured = auth_from_login_capture(login_match[1])
+        except DownloadError:
+            # Sanitized imported HARs intentionally retain only the login
+            # request. Replay that request below when the cached token expires.
+            captured = None
         if captured:
             token, uid, client_headers = captured
             save_cached_auth(cache_path, token, uid, client_headers)

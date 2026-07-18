@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import base64
 import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from unittest.mock import patch
 
 import download_latest_fit as onelap
@@ -28,6 +30,61 @@ class FakeResponse:
 
 
 class OneLapDirectTests(unittest.TestCase):
+    def test_download_record_fit_uses_base64_detail_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            fit_reference = "MAGENE_C406_2026-07-03_194804_336072.fit"
+            fit_content = b"\x00" * 8 + b".FIT" + b"payload"
+            with (
+                patch.object(client, "record_detail", return_value={"fitUrl": fit_reference}),
+                patch.object(client, "_authorized", return_value=fit_content) as authorized,
+            ):
+                status = client.download_record_fit("activity-id", target)
+
+            encoded = quote(
+                base64.b64encode(fit_reference.encode("utf-8")).decode("ascii"), safe=""
+            )
+            self.assertEqual(status, "downloaded")
+            self.assertEqual(target.read_bytes(), fit_content)
+            self.assertEqual(
+                authorized.call_args.args[1],
+                f"{onelap.OTM_BASE_URL}/api/otm/ride_record/analysis/fit_content/{encoded}",
+            )
+
+    def test_sanitized_login_har_replays_request_after_cache_expiry(self) -> None:
+        login_entry = {
+            "request": {
+                "url": f"https://{onelap.API_HOST}{onelap.LOGIN_PATH}",
+                "headers": [],
+                "postData": {"text": '{"account":"encrypted","password":"hash"}'},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            har_path = root / "login.har"
+            cache_path = root / "token.json"
+            har_path.write_text(
+                json.dumps({"log": {"entries": [login_entry]}}), encoding="utf-8"
+            )
+            with (
+                patch.object(onelap, "har_paths", return_value=[har_path]),
+                patch.object(onelap, "perform_login", return_value=("token", "uid", {})) as login,
+            ):
+                headers, source = onelap.obtain_auth(
+                    cache_path, str(har_path), str(har_path), 10
+                )
+
+        self.assertEqual(source, "login")
+        self.assertEqual(headers["Authorization"], "token")
+        login.assert_called_once_with(login_entry, 10)
+
     def test_configure_direct_auth_hashes_password_and_saves_tokens(self) -> None:
         requests = []
 
@@ -127,7 +184,14 @@ class OneLapDirectTests(unittest.TestCase):
                 if request.full_url.endswith("/analysis/456"):
                     payload = {
                         "code": 200,
-                        "data": {"ridingRecord": {"totalDistance": 42000, "time": 5400}},
+                        "data": {
+                            "ridingRecord": {
+                                "id": 336072,
+                                "totalDistance": 42000,
+                                "time": 5400,
+                                "fitUrl": "cached.fit",
+                            }
+                        },
                     }
                 else:
                     payload = {
@@ -137,6 +201,8 @@ class OneLapDirectTests(unittest.TestCase):
                                 {
                                     "id": 456,
                                     "start_riding_time": "2026-07-18T06:30:00+08:00",
+                                    "totalDistance": 0,
+                                    "time": 0,
                                 }
                             ]
                         },
@@ -148,6 +214,200 @@ class OneLapDirectTests(unittest.TestCase):
 
         self.assertEqual(records[0]["total_distance"], 42000)
         self.assertEqual(records[0]["total_time"], 5400)
+        self.assertEqual(records[0]["id"], "456")
+        self.assertEqual(records[0]["fit_reference"], "cached.fit")
+        self.assertTrue(records[0]["details_enriched"])
+
+    def test_otm_records_leave_unrepaired_metrics_unenriched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "c" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            list_response = {
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": "missing",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "totalDistance": 0,
+                        "time": 0,
+                    }]
+                },
+            }
+
+            with (
+                patch.object(client, "_authorized_json", return_value=list_response),
+                patch.object(
+                    client,
+                    "record_detail",
+                    return_value={"totalDistance": 0, "time": 0},
+                ),
+            ):
+                records = client.records(max_pages=1)
+
+        self.assertEqual(records[0]["total_distance"], 0)
+        self.assertEqual(records[0]["total_time"], 0)
+        self.assertFalse(records[0].get("details_enriched", False))
+
+    def test_otm_records_can_skip_missing_metric_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "c" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            list_response = {
+                "code": 200,
+                "data": {
+                    "list": [{
+                        "id": "validation",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "totalDistance": 0,
+                        "time": 0,
+                    }]
+                },
+            }
+
+            with (
+                patch.object(client, "_authorized_json", return_value=list_response),
+                patch.object(
+                    client,
+                    "record_detail",
+                    side_effect=AssertionError("auth validation must not fetch details"),
+                ),
+            ):
+                records = client.records(max_pages=1, enrich_missing_metrics=False)
+
+        self.assertEqual(records[0]["id"], "validation")
+        self.assertEqual(records[0]["total_distance"], 0)
+
+    def test_download_record_fit_reuses_preserved_detail_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            fit_content = b"\x00" * 8 + b".FIT" + b"payload"
+            with (
+                patch.object(
+                    client,
+                    "record_detail",
+                    side_effect=AssertionError("detail must not be fetched twice"),
+                ),
+                patch.object(client, "_authorized", return_value=fit_content),
+            ):
+                status = client.download_record_fit(
+                    "activity-id", target, fit_reference="cached.fit"
+                )
+
+            self.assertEqual(status, "downloaded")
+            self.assertEqual(target.read_bytes(), fit_content)
+
+    def test_download_record_fit_surfaces_risk_control_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            response = json.dumps(
+                {"code": -2, "msg": "操作过于频繁"}
+            ).encode("utf-8")
+
+            with patch.object(client, "_authorized", return_value=response):
+                with self.assertRaisesRegex(
+                    onelap.ApiRequestError, "risk control"
+                ):
+                    client.download_record_fit(
+                        "activity-id", target, fit_reference="cached.fit"
+                    )
+
+            self.assertFalse(target.exists())
+
+    def test_otm_records_supports_current_list_metrics_and_pagination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "e" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            response = {
+                "code": 200,
+                "data": {
+                    "pagination": {"total": 1, "has_more": False},
+                    "list": [{
+                        "id": "activity-1",
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "distance_km": 32.5,
+                        "time_seconds": 3600,
+                        "load_tss": 42.5,
+                    }],
+                },
+            }
+
+            with patch.object(onelap, "urlopen", return_value=FakeResponse(json.dumps(response).encode("utf-8"))) as opened:
+                records = onelap.OneLapOtmClient(auth_path, 10).records()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["total_distance"], 32500)
+        self.assertEqual(records[0]["total_time"], 3600)
+        self.assertEqual(records[0]["TSS"], 42.5)
+        self.assertEqual(opened.call_count, 1)
+
+    def test_otm_records_ignore_zero_metric_placeholders(self) -> None:
+        record = onelap.normalize_otm_record(
+            {
+                "id": "activity-1",
+                "start_riding_time": "2026-07-18T06:30:00+08:00",
+                "totalDistance": 0,
+                "distance_km": 32.5,
+                "time": 0,
+                "time_seconds": 3600,
+            }
+        )
+
+        self.assertIsNotNone(record)
+        self.assertEqual(record["total_distance"], 32500)
+        self.assertEqual(record["total_time"], 3600)
+
+    def test_otm_records_continues_after_server_capped_short_page(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / onelap.DIRECT_AUTH_CACHE
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "d" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            pages = []
+
+            def fake_open(request, timeout):
+                body = json.loads(request.data.decode("utf-8"))
+                pages.append(body["page"])
+                items = [
+                    {
+                        "id": body["page"],
+                        "start_riding_time": "2026-07-18T06:30:00+08:00",
+                        "distance": 1000,
+                        "time": 60,
+                    }
+                ] if body["page"] < 3 else []
+                return FakeResponse(json.dumps({"code": 200, "data": {"list": items}}).encode("utf-8"))
+
+            with patch.object(onelap, "urlopen", side_effect=fake_open):
+                records = onelap.OneLapOtmClient(auth_path, 10).records(page_size=50)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(pages, [1, 2, 3])
 
     def test_otm_client_refreshes_after_unauthorized_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
