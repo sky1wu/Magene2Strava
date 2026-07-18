@@ -611,6 +611,8 @@ class DashboardService:
                     if detail_name:
                         record["name"] = detail_name
                     record["details_enriched"] = True
+                except onelap.AuthenticationError:
+                    raise
                 except onelap.DownloadError as exc:
                     failures += 1
                     if "risk control" in str(exc).lower():
@@ -737,7 +739,10 @@ class DashboardService:
                 if direct:
                     filename = onelap.otm_fit_filename(record)
                     status = direct.download_record_fit(
-                        str(record["id"]), FIT_DIR / filename, force=False
+                        str(record["id"]),
+                        FIT_DIR / filename,
+                        force=False,
+                        fit_reference=str(record.get("fit_reference") or "") or None,
                     )
                 else:
                     assert headers is not None

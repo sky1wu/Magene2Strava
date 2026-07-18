@@ -510,7 +510,7 @@ class OneLapOtmClient:
             raise ApiRequestError("OneLap OTM activity detail is invalid")
         riding_record = data.get("ridingRecord")
         if isinstance(riding_record, dict):
-            return riding_record
+            return {**data, **riding_record}
         return data
 
     def records(
@@ -555,6 +555,11 @@ class OneLapOtmClient:
                             for key in ("total_distance", "total_time", "elevation", "cal", "TSS"):
                                 if detail_normalized[key] > 0:
                                     normalized[key] = detail_normalized[key]
+                            fit_reference = str(
+                                detail.get("fitUrl") or detail.get("fit_url") or ""
+                            ).strip()
+                            if fit_reference:
+                                normalized["fit_reference"] = fit_reference
                             normalized["details_enriched"] = True
                     except ApiRequestError as exc:
                         if "risk control" in str(exc).lower():
@@ -581,15 +586,25 @@ class OneLapOtmClient:
                 break
         return list(records.values())
 
-    def download_record_fit(self, record_id: str, target: Path, force: bool = False) -> str:
+    def download_record_fit(
+        self,
+        record_id: str,
+        target: Path,
+        force: bool = False,
+        fit_reference: str | None = None,
+    ) -> str:
         if target.exists() and not force:
             return "exists"
-        detail = self.record_detail(record_id)
-        fit_reference = str(detail.get("fitUrl") or detail.get("fit_url") or "").strip()
-        if not fit_reference:
+        reference = str(fit_reference or "").strip()
+        if not reference:
+            detail = self.record_detail(record_id)
+            reference = str(
+                detail.get("fitUrl") or detail.get("fit_url") or ""
+            ).strip()
+        if not reference:
             raise ApiRequestError("OneLap activity detail has no FIT reference")
         encoded_reference = quote(
-            base64.b64encode(fit_reference.encode("utf-8")).decode("ascii"), safe=""
+            base64.b64encode(reference.encode("utf-8")).decode("ascii"), safe=""
         )
         path = f"/api/otm/ride_record/analysis/fit_content/{encoded_reference}"
         raw: bytes | None = None

@@ -189,6 +189,7 @@ class OneLapDirectTests(unittest.TestCase):
                                 "id": 336072,
                                 "totalDistance": 42000,
                                 "time": 5400,
+                                "fitUrl": "cached.fit",
                             }
                         },
                     }
@@ -214,7 +215,34 @@ class OneLapDirectTests(unittest.TestCase):
         self.assertEqual(records[0]["total_distance"], 42000)
         self.assertEqual(records[0]["total_time"], 5400)
         self.assertEqual(records[0]["id"], "456")
+        self.assertEqual(records[0]["fit_reference"], "cached.fit")
         self.assertTrue(records[0]["details_enriched"])
+
+    def test_download_record_fit_reuses_preserved_detail_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth_path = root / onelap.DIRECT_AUTH_CACHE
+            target = root / "activity.fit"
+            auth_path.write_text(
+                json.dumps({"account": "rider", "password_md5": "f" * 32, "token": "access"}),
+                encoding="utf-8",
+            )
+            client = onelap.OneLapOtmClient(auth_path, 10)
+            fit_content = b"\x00" * 8 + b".FIT" + b"payload"
+            with (
+                patch.object(
+                    client,
+                    "record_detail",
+                    side_effect=AssertionError("detail must not be fetched twice"),
+                ),
+                patch.object(client, "_authorized", return_value=fit_content),
+            ):
+                status = client.download_record_fit(
+                    "activity-id", target, fit_reference="cached.fit"
+                )
+
+            self.assertEqual(status, "downloaded")
+            self.assertEqual(target.read_bytes(), fit_content)
 
     def test_otm_records_supports_current_list_metrics_and_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

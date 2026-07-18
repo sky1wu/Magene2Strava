@@ -893,7 +893,12 @@ def download_onelap_fit(
     timeout: float,
 ) -> str:
     if isinstance(source, onelap.OneLapOtmClient):
-        return source.download_record_fit(str(record["id"]), target, force=False)
+        return source.download_record_fit(
+            str(record["id"]),
+            target,
+            force=False,
+            fit_reference=str(record.get("fit_reference") or "") or None,
+        )
     if not reference:
         raise SyncError("Onelap FIT download URL is missing")
     return onelap.download_fit(reference, target, timeout, force=False)

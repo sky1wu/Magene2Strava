@@ -252,6 +252,20 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(records[0]["details_enriched"])
         self.assertTrue(records[1]["details_enriched"])
 
+    def test_enrich_direct_records_propagates_authentication_failures(self) -> None:
+        class FakeClient:
+            def record_detail(self, _record_id):
+                raise web_app.onelap.AuthenticationError("expired login")
+
+        records = [{"id": "expired", "name": "骑行训练", "start_time": 200}]
+
+        with self.assertRaisesRegex(
+            web_app.onelap.AuthenticationError, "expired login"
+        ):
+            web_app.DashboardService().enrich_direct_records(
+                FakeClient(), records, {}
+            )
+
     def test_har_refresh_keeps_cache_marked_unenriched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -299,7 +313,9 @@ class WebAppTests(unittest.TestCase):
                     {"id": "three", "name": "活动三", "start_time": 1_720_000_003},
                 ]
 
-            def download_record_fit(self, record_id, target, force=False):
+            def download_record_fit(
+                self, record_id, target, force=False, fit_reference=None
+            ):
                 if record_id == "three":
                     raise web_app.onelap.DownloadError("network")
                 return "exists" if record_id == "two" else "downloaded"
