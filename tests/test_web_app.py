@@ -63,7 +63,7 @@ class WebAppTests(unittest.TestCase):
 
         records = [
             {"id": "cached", "name": "骑行训练", "start_time": 100, "elevation": 0, "cal": 0, "TSS": 0},
-            {"id": "missing", "name": "骑行训练", "start_time": 200, "elevation": 0, "cal": 0, "TSS": 0},
+            {"id": "missing", "name": "骑行训练", "start_time": 200, "elevation": 0, "cal": 100, "TSS": 0},
         ]
         previous = {
             "activities": [{"id": "cached", "name": "缓存骑行", "elevation_m": 42, "calories": 300, "tss": 18}],

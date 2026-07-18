@@ -572,9 +572,6 @@ class DashboardService:
         total = len(records)
         for index, record in enumerate(records, 1):
             cached = cached_by_id.get(str(record.get("id")))
-            already_enriched = (
-                number(record.get("elevation")) > 0 or number(record.get("cal")) > 0
-            )
             can_reuse = bool(
                 cached
                 and (
@@ -583,9 +580,7 @@ class DashboardService:
                     or number(cached.get("calories")) > 0
                 )
             )
-            if already_enriched:
-                pass
-            elif can_reuse and cached:
+            if can_reuse and cached:
                 record["elevation"] = number(cached.get("elevation_m"))
                 record["cal"] = number(cached.get("calories"))
                 if number(record.get("TSS")) <= 0:
